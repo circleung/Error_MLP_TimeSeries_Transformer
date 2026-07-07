@@ -1,0 +1,96 @@
+# Per-accident-type Error-MLP AR-correction config.
+#
+# ADDITIVE: parallel to error_mlp.yaml (the verified 60min combined path). Nothing
+# here touches the 60min path. Backbones are the per-accident-type
+# SimpleDecoderOnlyTransformer ("ABC-Transformer") cells trained with seq_len=50,
+# pred_len=1, 10 continuous + per-cell controls.
+#
+# SINGLE SOURCE OF TRUTH for backbone_kwargs/lightning_kwargs/model.name is each
+# cell's <run_dir>/config_used.yaml (loaded by load_frozen_backbone_acc). Only the
+# ckpt lives in <run_dir>/transformer_decoder_wonung_checkpoints_absolute/.
+#
+# in_dim is resolved PER CELL at runtime: 20 + num_controls + 1
+#   -> 25 for SBO / LLOCA_CSP / LLOCA_ECSBS (4 controls)
+#   -> 26 for TLOFW_CSP / TLOFW_ECSBS       (5 controls)
+#
+# step_norm_const: fixed round number >= the max rollout length seen in the cell's
+# test set (measured: SBO=787, LLOCA=802, TLOFW=802 steps for seq50). 1000.0 is a
+# clean round number >= all of these, so step_norm = step/1000 in [0, ~0.8] means
+# the same thing across every scenario / cell / run. Recorded per cell (and echoed
+# into each cell's eval json) so the feature is comparable end-to-end.
+
+data:
+  seq_len: 50
+  pred_len: 1
+  num_continuous: 10
+  cache_dir: "/home/wonung/wonung_data/error_mlp_accident_out/_window_cache"
+
+seq50_data_root: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data"
+weight_root: "/home/wonung/wonung_data/APR1400_weight"
+
+# Per-cell backbone run_dir + SCALED train/test csv. num_controls/step_norm_const
+# recorded for reference (num_controls is also inferred from the csv header).
+cells:
+  SBO:
+    run_dir: "/home/wonung/wonung_data/APR1400_weight/SBO_seq50_pred1"
+    train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_SBO/SBO_Train_Scaled.csv"
+    test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_SBO/SBO_Test_Scaled.csv"
+    num_controls: 4
+    step_norm_const: 1000.0
+  LLOCA_CSP:
+    run_dir: "/home/wonung/wonung_data/APR1400_weight/LLOCA_CSP_seq50_pred1"
+    train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/CSP/LLOCA_CSP_Train_0_Scaled.csv"
+    test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/CSP/LLOCA_CSP_Test_0_Scaled.csv"
+    num_controls: 4
+    step_norm_const: 1000.0
+  LLOCA_ECSBS:
+    run_dir: "/home/wonung/wonung_data/APR1400_weight/LLOCA_ECSBS_seq50_pred1"
+    train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/ECSBS/LLOCA_ECSBS_Train_0_Scaled.csv"
+    test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/ECSBS/LLOCA_ECSBS_Test_0_Scaled.csv"
+    num_controls: 4
+    step_norm_const: 1000.0
+  TLOFW_CSP:
+    run_dir: "/home/wonung/wonung_data/APR1400_weight/TLOFW_CSP_seq50_pred1"
+    train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/CSP/TLOFW_CSP_Train_0_Scaled.csv"
+    test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/CSP/TLOFW_CSP_Test_0_Scaled.csv"
+    num_controls: 5
+    step_norm_const: 1000.0
+  TLOFW_ECSBS:
+    run_dir: "/home/wonung/wonung_data/APR1400_weight/TLOFW_ECSBS_seq50_pred1"
+    train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/ECSBS/TLOFW_ECSBS_Train_0_Scaled.csv"
+    test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/ECSBS/TLOFW_ECSBS_Test_0_Scaled.csv"
+    num_controls: 5
+    step_norm_const: 1000.0
+
+# Global ErrorMLP arch. in_dim is set per cell at runtime (NOT read from here).
+error_mlp:
+  hidden_dim: 64
+  num_hidden: 2
+  out_dim: 10
+  dropout: 0.1
+  activation: "relu"
+
+training:
+  loss: "smoothl1"
+  huber_beta: 0.01
+  lr: 0.001
+  weight_decay: 0.0001
+  epochs: 30
+  batch_size: 4096
+  grad_clip_norm: 1.0
+  val_split_by_scenario: 0.15   # scenario-disjoint held-out (early stop AND beta selection)
+  seed: 42
+  dataloader_shuffle: true
+  dataloader_seed: 42
+  num_workers: 4
+  device: "cuda:0"
+  dagger_rounds: 0              # Phase-2 DAgger rounds after round-0 (default 0 = round-0 only)
+  collect_batch: 2048          # AR collect DataLoader batch size (seq50 windows are larger)
+
+eval:
+  betas: [0.0, 0.25, 0.5, 0.75, 1.0]
+  select_metric: "micro_mae"   # beta chosen on held-out scenarios (full corrected AR)
+  step_index_ablation: true    # also run selected-beta corrected AR with step_norm zeroed
+
+# Outputs go HERE (NOT the weight dirs, NOT the repo). Per cell: <out_root>/<cell>/.
+out_root: "/home/wonung/wonung_data/error_mlp_accident_out"
