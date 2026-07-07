@@ -271,3 +271,155 @@ def autoregressive_corrected_batched_acc(model, error_mlp, beta, dataset, num_co
         SIDd = np.concatenate(SIDd_chunks, axis=0) if SIDd_chunks else np.zeros((0,), np.int64)
         return predictions_dict, true_dict, Xd, Yd, SIDd
     return predictions_dict, true_dict
+
+
+# ---------------------------------------------------------------------------
+# Gated (selective) tail-correction primitives (ADDITIVE; used only by
+# experiments/tail_analysis_acc.py). These do NOT change the behavior of any
+# function above -- they add two new read-only-on-the-backbone rollouts.
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+def baseline_rollout_with_stats_acc(model, error_mlp, dataset, num_controls,
+                                    step_norm_const, device="cuda",
+                                    num_continuous=10, collect_batch=2048,
+                                    num_workers=4, restrict_scenarios=None,
+                                    step_norm_scale=1.0):
+    """UNCORRECTED (beta=0) lockstep AR that ALSO collects, per ACTIVE step, the
+    aligned flat arrays needed for gated tail analysis. Computing e_hat here does
+    NOT change the trajectory: the fed-back value is always the RAW backbone
+    prediction (exact beta=0 baseline), so `step_err` below is the true baseline
+    per-step error distribution.
+
+    Per active step t the following aligned scalars are collected:
+        step_err = mean_k |CY[:,t,k] - raw[:,k]|   (per-step error, SAME unit as
+                   compute_micro_macro's per-step MAE)
+        g        = || error_mlp(feats) ||_2        (predicted-error L2; the gate
+                   score for gate_on='pred')
+        true_g   = || CY[:,t] - raw ||_2           (realized-error L2; the gate
+                   score for gate_on='true' = ORACLE)
+        sid      = scenario id (for worst-scenario aggregation)
+
+    Returns dict with float32 1-D arrays {step_err, g, true_g, sid} (sid int64),
+    all aligned and pooled over (scenario, step). error_mlp must be non-None (g
+    needs it)."""
+    assert error_mlp is not None, "baseline_rollout_with_stats_acc needs error_mlp for g"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        z = np.zeros((0,), np.float32)
+        return {"step_err": z, "g": z.copy(), "true_g": z.copy(),
+                "sid": np.zeros((0,), np.int64)}
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    CY_t = torch.from_numpy(CY).to(device)
+    lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+    order_t = torch.tensor([int(s) for s in order], dtype=torch.int64, device=device)
+
+    se_chunks, g_chunks, tg_chunks, sid_chunks = [], [], [], []
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(base+stats)"):
+        raw = model(window)                                   # [S, 10]
+        active = t < lengths_t
+        if active.any():
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                           # [S, 10]
+            diff = CY_t[:, t, :] - raw                         # [S, 10]
+            step_err = diff.abs().mean(dim=1)                  # [S]  per-step MAE
+            g = torch.linalg.vector_norm(e_hat, ord=2, dim=1)  # [S]
+            true_g = torch.linalg.vector_norm(diff, ord=2, dim=1)  # [S]
+            se_chunks.append(step_err[active].detach().cpu().numpy().astype(np.float32))
+            g_chunks.append(g[active].detach().cpu().numpy().astype(np.float32))
+            tg_chunks.append(true_g[active].detach().cpu().numpy().astype(np.float32))
+            sid_chunks.append(order_t[active].detach().cpu().numpy().astype(np.int64))
+        # beta==0: RAW is fed back (exact uncorrected baseline trajectory).
+        next_row = torch.cat([raw, UY_t[:, t, :]], dim=1)     # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    cat = lambda cs, dt: (np.concatenate(cs, axis=0) if cs else np.zeros((0,), dt))
+    return {
+        "step_err": cat(se_chunks, np.float32),
+        "g": cat(g_chunks, np.float32),
+        "true_g": cat(tg_chunks, np.float32),
+        "sid": cat(sid_chunks, np.int64),
+    }
+
+
+@torch.inference_mode()
+def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_controls,
+                                step_norm_const, device="cuda", gate_on="pred",
+                                num_continuous=10, collect_batch=2048,
+                                num_workers=4, restrict_scenarios=None,
+                                step_norm_scale=1.0):
+    """GATED (selective) corrected AR. Lockstep rollout where at each step the
+    correction `raw + beta*e_hat` is applied ONLY where the gate fires; elsewhere
+    the value is `raw`. The chosen value (corr where gated, raw otherwise) is BOTH
+    fed back AND reported.
+
+    Gate:
+        gate_on='pred' -> fire where g      = ||e_hat||_2      >  tau
+        gate_on='true' -> fire where true_g = ||CY - raw||_2   >  tau   (ORACLE)
+
+    Null-op contract: beta == 0.0 or tau == +inf => gate never applies a nonzero
+    correction => the reported/fed-back trajectory is byte-identical to the
+    uncorrected baseline AR. (Asserted once before the loop.)
+
+    Returns (predictions_dict, true_dict) keyed by scenario id, exactly like
+    autoregressive_corrected_batched_acc, so compute_micro_macro / per-step tail
+    metrics consume it unchanged."""
+    assert gate_on in ("pred", "true"), f"gate_on must be 'pred' or 'true', got {gate_on}"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    if error_mlp is not None:
+        error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    # Null-op assertion: beta==0 or tau==inf must be an exact baseline.
+    null_op = (float(beta) == 0.0) or (not np.isfinite(tau)) or (error_mlp is None)
+    do_corr = not null_op
+
+    predictions_dict, true_dict = defaultdict(list), defaultdict(list)
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        return predictions_dict, true_dict
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    CY_t = torch.from_numpy(CY).to(device)
+    preds = np.zeros((S, maxL, num_continuous), np.float32)
+    tau_t = None if null_op else torch.as_tensor(float(tau), device=device, dtype=torch.float32)
+
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(gated)"):
+        raw = model(window)                                   # [S, 10]
+        if do_corr:
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                           # [S, 10]
+            if gate_on == "pred":
+                score = torch.linalg.vector_norm(e_hat, ord=2, dim=1)          # [S]
+            else:  # 'true' = ORACLE gate on realized error
+                score = torch.linalg.vector_norm(CY_t[:, t, :] - raw, ord=2, dim=1)
+            fire = (score > tau_t).unsqueeze(1)               # [S, 1] bool
+            corr_full = raw + beta * e_hat                    # [S, 10]
+            chosen = torch.where(fire, corr_full, raw)        # gated select
+        else:
+            chosen = raw                                      # exact null-op
+        preds[:, t, :] = chosen.detach().cpu().numpy()
+        next_row = torch.cat([chosen, UY_t[:, t, :]], dim=1)  # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    for i, s in enumerate(order):
+        L = lengths[i]
+        for t in range(L):
+            predictions_dict[s].append(preds[i, t])
+            true_dict[s].append(CY[i, t])
+    return predictions_dict, true_dict
