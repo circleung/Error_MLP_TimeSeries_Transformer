@@ -1,0 +1,125 @@
+{
+  "interval": "60min",
+  "seq_len": 3,
+  "seed": 42,
+  "betas": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "select_metric": "micro_mae",
+  "beta_star": 0.25,
+  "baseline_ar": {
+    "micro_mae": 0.06390735,
+    "macro_mae": 0.06393082
+  },
+  "beta0_null_op_ok": true,
+  "beta0_micro_mae": 0.06390735470226866,
+  "test_curve": {
+    "0.0": {
+      "micro_mae": 0.06390735470226866,
+      "micro_rmse": 0.09915485098669177,
+      "macro_mae": 0.06393082624037087,
+      "macro_rmse": 0.09918280242442809,
+      "n_scen": 1100
+    },
+    "0.25": {
+      "micro_mae": 0.03440446647135314,
+      "micro_rmse": 0.059482854756356666,
+      "macro_mae": 0.03444663399281181,
+      "macro_rmse": 0.05954128202437452,
+      "n_scen": 1100
+    },
+    "0.5": {
+      "micro_mae": 0.036615890113320636,
+      "micro_rmse": 0.06569314048562704,
+      "macro_mae": 0.036653142269342985,
+      "macro_rmse": 0.06574040363252753,
+      "n_scen": 1100
+    },
+    "0.75": {
+      "micro_mae": 0.04020149778474323,
+      "micro_rmse": 0.07287660502666027,
+      "macro_mae": 0.04023816229714214,
+      "macro_rmse": 0.07292169824793845,
+      "n_scen": 1100
+    },
+    "1.0": {
+      "micro_mae": 0.04255098635687431,
+      "micro_rmse": 0.07776370150718652,
+      "macro_mae": 0.04257908141787319,
+      "macro_rmse": 0.0777913416021703,
+      "n_scen": 1100
+    }
+  },
+  "selection_curve_heldout": {
+    "0.0": {
+      "micro_mae": 0.06665716845097173,
+      "micro_rmse": 0.10272694651277806,
+      "macro_mae": 0.06678623126608221,
+      "macro_rmse": 0.10289014334786162,
+      "n_scen": 1485
+    },
+    "0.25": {
+      "micro_mae": 0.03390754992119259,
+      "micro_rmse": 0.05879396230828067,
+      "macro_mae": 0.034026464215680466,
+      "macro_rmse": 0.0589678041637587,
+      "n_scen": 1485
+    },
+    "0.5": {
+      "micro_mae": 0.036677671956471654,
+      "micro_rmse": 0.06597867183295655,
+      "macro_mae": 0.03678627439803581,
+      "macro_rmse": 0.06613076963271247,
+      "n_scen": 1485
+    },
+    "0.75": {
+      "micro_mae": 0.04015301005491304,
+      "micro_rmse": 0.07304451219232028,
+      "macro_mae": 0.0402729931066067,
+      "macro_rmse": 0.07320727343527306,
+      "n_scen": 1485
+    },
+    "1.0": {
+      "micro_mae": 0.04271182378330749,
+      "micro_rmse": 0.0784913852968444,
+      "macro_mae": 0.04283901963048302,
+      "macro_rmse": 0.07866088562558213,
+      "n_scen": 1485
+    }
+  },
+  "beta_star_test_metrics": {
+    "micro_mae": 0.03440446647135314,
+    "micro_rmse": 0.059482854756356666,
+    "macro_mae": 0.03444663399281181,
+    "macro_rmse": 0.05954128202437452,
+    "n_scen": 1100
+  },
+  "per_scenario_win_fraction": 0.7618181818181818,
+  "per_scenario_wins": 838,
+  "per_scenario_total": 1100,
+  "step_index_ablation": {
+    "metrics_step_norm_zeroed": {
+      "micro_mae": 0.041625046557440815,
+      "micro_rmse": 0.06717076991898789,
+      "macro_mae": 0.041657297483176335,
+      "macro_rmse": 0.06721426254011832,
+      "n_scen": 1100
+    },
+    "delta_vs_beta_star": {
+      "micro_mae": 0.007220580086087676,
+      "macro_mae": 0.007210663490364526,
+      "micro_rmse": 0.0076879151626312245,
+      "macro_rmse": 0.007672980515743805
+    }
+  },
+  "non_regression": {
+    "micro": true,
+    "macro": true
+  },
+  "positive_result": true,
+  "clearly_worked_label": true
+}
