@@ -1,3 +1,5 @@
+import os
+import sys
 import torch
 from torch import nn
 from pytorch_lightning import LightningModule
@@ -13,7 +15,11 @@ class LitRNNBaseModel(LightningModule):
         self.tolerance = tolerance
         self.y_type = y_type
         print(f"Using {self.y_type} as target variable for training and validation.")
-        _ = input("Press Enter to continue...")  # Pause for user confirmation
+        # Pause for user confirmation only in an interactive terminal.
+        # Skip when running non-interactively (sweeps/background) or when
+        # NONINTERACTIVE=1 is set, so automated runs don't block on stdin.
+        if os.environ.get("NONINTERACTIVE", "") != "1" and sys.stdin and sys.stdin.isatty():
+            _ = input("Press Enter to continue...")
 
     def forward(self, x):
         return self.backbone(x)
