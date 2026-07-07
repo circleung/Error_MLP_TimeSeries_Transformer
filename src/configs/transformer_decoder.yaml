@@ -1,0 +1,32 @@
+model:
+  name: transformer_decoder
+  backbone_kwargs:
+    input_size: 20
+    num_continuous: 10
+    d_model: 64
+    nhead: 4
+    num_layers: 4
+    dropout: 0.1
+
+  lightning_kwargs:
+    tolerance: 0.05
+    y_type: "continuous_y" # Available: difference_y_cont, continuous_y
+
+data:
+  data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/data/kaist/combined_sorted_data_normalization_15min_with_CT_PZ_train.csv"
+  # test_data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/data/kaist/combined_sorted_data_normalization_15min_with_CT_PZ_train.csv"
+  test_data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/data/kaist/combined_sorted_data_normalization_15min_with_CT_PZ_test.csv"
+  sequence_length: 3
+  prediction_length: 1
+  batch_size: 128
+  prediction_type: "absolute" # available: diff, absolute
+
+training:
+  epochs: 20
+  optimizer: adamw
+  lr: 0.001
+  train_split: 0.9
+  scheduler:
+    type: StepLR
+    step_size: 5
+    gamma: 0.2

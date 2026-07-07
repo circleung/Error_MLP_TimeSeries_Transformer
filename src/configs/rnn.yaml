@@ -1,0 +1,27 @@
+model:
+  name: rnn
+  backbone_kwargs:
+    input_size: 17
+    hidden_size: 64
+    num_layers: 2
+    device: cuda
+    num_continuous: 7
+  lightning_kwargs:
+    tolerance: 0.05
+
+data:
+  data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/train_data.csv"
+  test_data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/test_data.csv"
+  sequence_length: 20
+  prediction_length: 1
+  batch_size: 32
+
+training:
+  epochs: 20
+  optimizer: adamw
+  lr: 0.001
+  train_split: 0.9
+  scheduler:
+    type: StepLR
+    step_size: 5
+    gamma: 0.2

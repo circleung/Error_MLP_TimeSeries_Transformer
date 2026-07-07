@@ -1,0 +1,29 @@
+model:
+  name: crossattention_transformer
+  backbone_kwargs:
+    input_size: 17
+    num_continuous: 7
+    d_model: 32
+    nhead: 4
+    num_layers: 2
+    dropout: 0.1
+
+  lightning_kwargs:
+    tolerance: 0.05
+
+data:
+  data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/train_data_900.csv"
+  test_data_path: "/media/8TB_hardisk/sangam/timeseries_forecasting/test_data_900.csv"
+  sequence_length: 20
+  prediction_length: 1
+  batch_size: 32
+
+training:
+  epochs: 20
+  optimizer: adamw
+  lr: 0.001
+  train_split: 0.9
+  scheduler:
+    type: StepLR
+    step_size: 5
+    gamma: 0.2

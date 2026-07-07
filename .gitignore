@@ -1,0 +1,31 @@
+# --- OMC / session artifacts ---
+.omc/
+
+# --- data (large; lives in the source repo, referenced by absolute path) ---
+*.csv
+*.CSV
+
+# --- checkpoints / weights ---
+*.ckpt
+*.pt
+
+# --- training / eval outputs ---
+logs/
+cache/
+*.cache
+checkpoints/
+lightning_logs/
+training_logs/
+*_logs*/
+plots/
+plots_*/
+
+# --- notebooks scratch ---
+.ipynb_checkpoints/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+
+# --- archives ---
+*.zip
