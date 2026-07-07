@@ -1,0 +1,54 @@
+# Error-MLP AR correction config (60min/k3/seed42 smoke).
+#
+# NOTE: absolute paths below assume SWEEP_ROOT default = /data/wonung_data/timeseries_prediction_transformer
+# (the OLD data-bearing tree; identical to sweep_config.ROOT default). If SWEEP_ROOT is
+# overridden, override run_dir/train_csv/test_csv together. All are in the OLD tree by design.
+backbone:
+  # frozen; loaded from existing layer8 ckpt (state_dict), not retrained.
+  # SINGLE SOURCE OF TRUTH: backbone_kwargs/lightning_kwargs are NOT set here; load_frozen_backbone
+  # reads them from run_dir/config_used.yaml exactly like sweep_eval.load_model.
+  run_dir: "/data/wonung_data/timeseries_prediction_transformer/src/training_logs_layer8/60min/seq3/seed42"
+  ckpt: "checkpoints/epoch=11-val_loss=0.00073418-step=58272.ckpt"   # explicit; else find_best_ckpt
+
+data:
+  interval: "60min"
+  seq_len: 3
+  pred_len: 1
+  prediction_type: "absolute"
+  train_csv: "/data/wonung_data/timeseries_prediction_transformer/60/combined_sorted_data_normalization_60min_with_CT_PZ_train.csv"
+  test_csv:  "/data/wonung_data/timeseries_prediction_transformer/60/combined_sorted_data_normalization_60min_with_CT_PZ_test.csv"
+
+error_mlp:
+  in_dim: 31
+  hidden_dim: 64
+  num_hidden: 2
+  out_dim: 10
+  dropout: 0.1
+  activation: "relu"
+
+training:
+  loss: "smoothl1"          # smoothl1 | l1 | mse   (recommended smoothl1)
+  huber_beta: 0.01
+  lr: 0.001
+  weight_decay: 0.0001
+  epochs: 30
+  batch_size: 4096
+  grad_clip_norm: 1.0           # torch.nn.utils.clip_grad_norm_ every step (R1 reproducibility)
+  val_split_by_scenario: 0.15   # scenario-disjoint held-out for early stop AND beta selection
+  seed: 42                      # seed_everything(seed, workers=True) at script top
+  dataloader_shuffle: true      # train loader shuffles; seeded via torch.Generator(seed)
+  dataloader_seed: 42           # DataLoader(generator=torch.Generator().manual_seed(...))
+  num_workers: 4
+  device: "cuda:0"
+  out_dir: "/data/wonung_data/timeseries_prediction_transformer/src/error_mlp_logs/60min/seq3/seed42"
+  dagger_rounds: 0              # Phase-2 DAgger rounds AFTER round-0. Default 0 = round-0 only.
+                               #   >0: fine-tune from round-0 weights (NOT from scratch) on
+                               #   round-0 data + on-corrected-trajectory data at selected beta.
+
+eval:
+  betas: [0.0, 0.25, 0.5, 0.75, 1.0]
+  select_metric: "micro_mae"    # beta chosen on held-out scenarios (full corrected AR), reported on test
+  baseline_ar_mae: 0.06390735   # sanity target from eval_metrics.json
+  baseline_ar_macro_mae: 0.06393082
+  step_index_ablation: true     # also run selected-beta corrected AR with step_norm zeroed
+  plot_by_default: false        # error-accumulation plots opt-in via --plot flag (reporting scope only)
