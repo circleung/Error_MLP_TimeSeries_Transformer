@@ -423,3 +423,207 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
             predictions_dict[s].append(preds[i, t])
             true_dict[s].append(CY[i, t])
     return predictions_dict, true_dict
+
+
+# ---------------------------------------------------------------------------
+# Per-(step, variable) gated tail-correction primitives (ADDITIVE; used only by
+# experiments/variable_gating_acc.py). These do NOT touch any function above.
+# They add (a) a baseline pass that collects per-variable predicted-error
+# magnitudes for per-variable gate calibration, and (b) a rollout that gates the
+# correction per CELL (step, variable) -- a strict superset of the step gate.
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+def baseline_var_stats_acc(model, error_mlp, dataset, num_controls,
+                           step_norm_const, device="cuda",
+                           num_continuous=10, collect_batch=2048,
+                           num_workers=4, restrict_scenarios=None,
+                           step_norm_scale=1.0):
+    """UNCORRECTED (beta=0) lockstep AR that collects PER-(active step, variable)
+    stats for per-variable gate calibration. The fed-back value is always the RAW
+    backbone prediction (exact beta=0 baseline), so these are the TRUE baseline
+    distributions (computing e_hat here does not change the trajectory).
+
+    Per active step t the following aligned rows are collected:
+        abs_ehat = |error_mlp(feats)|          [.,10]  per-variable predicted-error
+                   magnitude -> the gate score for the per-(step,variable) gate.
+        abs_err  = |CY[:,t] - raw|             [.,10]  realized per-variable error.
+        g        = ||error_mlp(feats)||_2      [.]     step-level pred-error L2 (the
+                   step-gate score; == baseline_rollout_with_stats_acc's g).
+        step_err = mean_k |CY[:,t,k]-raw[:,k]| [.]     per-step MAE (compute_micro_macro unit).
+        sid      = scenario id                 [.]
+
+    Returns {abs_ehat [N,10], abs_err [N,10], g [N], step_err [N], sid [N]} (float32,
+    sid int64), all aligned and pooled over (scenario, step). error_mlp must be
+    non-None (abs_ehat/g need it)."""
+    assert error_mlp is not None, "baseline_var_stats_acc needs error_mlp for abs_ehat/g"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        z1 = np.zeros((0,), np.float32)
+        z2 = np.zeros((0, num_continuous), np.float32)
+        return {"abs_ehat": z2, "abs_err": z2.copy(), "g": z1, "step_err": z1.copy(),
+                "sid": np.zeros((0,), np.int64)}
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    CY_t = torch.from_numpy(CY).to(device)
+    lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+    order_t = torch.tensor([int(s) for s in order], dtype=torch.int64, device=device)
+
+    ae_chunks, aerr_chunks, g_chunks, se_chunks, sid_chunks = [], [], [], [], []
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(var-stats)"):
+        raw = model(window)                                   # [S, 10]
+        active = t < lengths_t
+        if active.any():
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                           # [S, 10]
+            diff = CY_t[:, t, :] - raw                         # [S, 10]
+            abs_ehat = e_hat.abs()                             # [S, 10]
+            abs_err = diff.abs()                               # [S, 10]
+            g = torch.linalg.vector_norm(e_hat, ord=2, dim=1)  # [S]
+            step_err = abs_err.mean(dim=1)                     # [S]
+            ae_chunks.append(abs_ehat[active].detach().cpu().numpy().astype(np.float32))
+            aerr_chunks.append(abs_err[active].detach().cpu().numpy().astype(np.float32))
+            g_chunks.append(g[active].detach().cpu().numpy().astype(np.float32))
+            se_chunks.append(step_err[active].detach().cpu().numpy().astype(np.float32))
+            sid_chunks.append(order_t[active].detach().cpu().numpy().astype(np.int64))
+        # beta==0: RAW is fed back (exact uncorrected baseline trajectory).
+        next_row = torch.cat([raw, UY_t[:, t, :]], dim=1)     # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    catf = lambda cs, w: (np.concatenate(cs, axis=0) if cs else np.zeros((0, w), np.float32))
+    cat1 = lambda cs, dt: (np.concatenate(cs, axis=0) if cs else np.zeros((0,), dt))
+    return {
+        "abs_ehat": catf(ae_chunks, num_continuous),
+        "abs_err": catf(aerr_chunks, num_continuous),
+        "g": cat1(g_chunks, np.float32),
+        "step_err": cat1(se_chunks, np.float32),
+        "sid": cat1(sid_chunks, np.int64),
+    }
+
+
+@torch.inference_mode()
+def var_gated_corrected_rollout_acc(model, error_mlp, beta, dataset, num_controls,
+                                    step_norm_const, gate="var", tau_vec=None,
+                                    tau_step=None, device="cuda", num_continuous=10,
+                                    collect_batch=2048, num_workers=4,
+                                    restrict_scenarios=None, step_norm_scale=1.0):
+    """PER-(step, variable) gated corrected AR (ADDITIVE; a superset of the step gate).
+
+    At each rollout step t the correction `raw + beta*e_hat` is applied per CELL
+    (step t, variable j) ONLY where the gate fires; elsewhere the value is `raw`.
+    The MIXED row (corrected j's + raw others) is BOTH fed back AND reported.
+
+    gate:
+      'var'  -> fire cell (t,j) where |e_hat_{t,j}| > tau_vec[j]  (per-variable
+                threshold; the per-(step,variable) DYNAMIC gate). A fixed-variable-set
+                gate is the special case tau_vec[j] = -inf for the chosen j's (always
+                corrected) and +inf elsewhere (never corrected).
+      'step' -> fire the WHOLE step (all vars) where ||e_hat_t||_2 > tau_step
+                (reproduces gated_corrected_rollout_acc's step gate byte-for-byte,
+                but ALSO reports the (step,variable)-cell intervention rate so step-
+                and variable-gating are directly comparable on "cells touched").
+
+    Null-op: beta==0, or error_mlp is None, or ('step' with non-finite tau_step),
+    or ('var' with every tau_vec entry +inf) => byte-identical uncorrected baseline
+    AR (asserted before the loop; the reported/fed-back trajectory is exactly `raw`).
+
+    Returns (predictions_dict, true_dict, interv). `interv` is the realized
+    (corrected-trajectory) intervention accounting over ACTIVE (step,variable)
+    cells: {n_active_cells, n_fired, intervention_rate, per_var_active[10],
+    per_var_fired[10], per_var_rate[10]}."""
+    assert gate in ("var", "step"), f"gate must be 'var' or 'step', got {gate}"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    if error_mlp is not None:
+        error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    if gate == "var":
+        assert tau_vec is not None, "gate='var' needs tau_vec [num_continuous]"
+        tv = np.asarray(tau_vec, dtype=np.float32).reshape(-1)
+        assert tv.shape[0] == num_continuous, f"tau_vec must be length {num_continuous}"
+        empty_gate = bool(np.all(np.isposinf(tv)))            # all +inf -> never fires
+    else:
+        empty_gate = (tau_step is None) or (not np.isfinite(tau_step))
+
+    null_op = (float(beta) == 0.0) or (error_mlp is None) or empty_gate
+    do_corr = not null_op
+
+    predictions_dict, true_dict = defaultdict(list), defaultdict(list)
+    zero_interv = {
+        "n_active_cells": 0, "n_fired": 0, "intervention_rate": 0.0,
+        "per_var_active": [0] * num_continuous, "per_var_fired": [0] * num_continuous,
+        "per_var_rate": [0.0] * num_continuous,
+    }
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        return predictions_dict, true_dict, zero_interv
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+    preds = np.zeros((S, maxL, num_continuous), np.float32)
+
+    if do_corr and gate == "var":
+        tau_t = torch.from_numpy(tv).to(device)               # [10]
+    elif do_corr:
+        tau_t = torch.as_tensor(float(tau_step), device=device, dtype=torch.float32)
+
+    per_var_fired = torch.zeros(num_continuous, dtype=torch.int64, device=device)
+    per_var_active = torch.zeros(num_continuous, dtype=torch.int64, device=device)
+
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(var-gated)"):
+        raw = model(window)                                   # [S, 10]
+        active = t < lengths_t                                # [S] bool
+        per_var_active += active.sum().to(torch.int64)        # scalar broadcast over [10]
+        if do_corr:
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                           # [S, 10]
+            if gate == "var":
+                fire = e_hat.abs() > tau_t                     # [S, 10] per-variable
+            else:  # 'step': whole-step fire broadcast to all vars
+                score = torch.linalg.vector_norm(e_hat, ord=2, dim=1)          # [S]
+                fire = (score > tau_t).unsqueeze(1).expand(-1, num_continuous)  # [S, 10]
+            corr_full = raw + beta * e_hat                    # [S, 10]
+            chosen = torch.where(fire, corr_full, raw)        # mixed row (gated cells)
+            per_var_fired += (fire & active.unsqueeze(1)).sum(dim=0).to(torch.int64)
+        else:
+            chosen = raw                                      # exact null-op
+        preds[:, t, :] = chosen.detach().cpu().numpy()
+        next_row = torch.cat([chosen, UY_t[:, t, :]], dim=1)  # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    for i, s in enumerate(order):
+        L = lengths[i]
+        for t in range(L):
+            predictions_dict[s].append(preds[i, t])
+            true_dict[s].append(CY[i, t])
+
+    pva = per_var_active.detach().cpu().numpy().astype(np.int64)
+    pvf = per_var_fired.detach().cpu().numpy().astype(np.int64)
+    n_active_cells = int(pva.sum())
+    n_fired = int(pvf.sum())
+    per_var_rate = [float(pvf[j]) / float(pva[j]) if pva[j] > 0 else 0.0
+                    for j in range(num_continuous)]
+    interv = {
+        "n_active_cells": n_active_cells,
+        "n_fired": n_fired,
+        "intervention_rate": (float(n_fired) / float(n_active_cells)
+                              if n_active_cells > 0 else 0.0),
+        "per_var_active": [int(x) for x in pva],
+        "per_var_fired": [int(x) for x in pvf],
+        "per_var_rate": per_var_rate,
+    }
+    return predictions_dict, true_dict, interv
