@@ -14,7 +14,7 @@ Covered: the five APR1400 per-accident backbones released with ABC-Transformer.
 These are **SBO**, **LLOCA-CSP**, **LLOCA-ECSBS**, **TLOFW-CSP** and **TLOFW-ECSBS**
 (Δt = 5 min, lookback k = 50, 10 continuous channels plus 4–5 SAMG binaries as known inputs).
 
-Model weights: **[Google Drive folder](https://drive.google.com/drive/folders/1IhY1foMvVT7yi7Au6Y9wvYNjc8dRdHHp?usp=drive_link)**
+Model weights: **[Google Drive folder](https://drive.google.com/drive/folders/1soFQC-1DXXeePR3q_8CfbhDNvLJQwY5v?usp=sharing)**
 (see `weights_manifest.csv` for the index and checksums).
 
 ---
@@ -163,7 +163,7 @@ This section will be updated with the results.
 
 ## 4. Released weights
 
-Download the Drive folder (or `Error_MLP_weights.zip`) and place it as `weights/` in the repo root:
+Download `Error_MLP_weights.zip` from the Drive folder above and unzip it in the repo root (it creates `weights/`):
 
 ```
 weights/
