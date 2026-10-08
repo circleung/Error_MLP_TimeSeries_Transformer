@@ -71,7 +71,7 @@ error_mlp:
   activation: "relu"
 
 training:
-  loss: "smoothl1"
+  loss: "smoothl1"              # keep default smoothl1; tail_weighted (below) is opt-in
   huber_beta: 0.01
   lr: 0.001
   weight_decay: 0.0001
@@ -86,11 +86,33 @@ training:
   device: "cuda:0"
   dagger_rounds: 0              # Phase-2 DAgger rounds after round-0 (default 0 = round-0 only)
   collect_batch: 2048          # AR collect DataLoader batch size (seq50 windows are larger)
+  dagger_rollback_tol: 0.0     # DAgger held-out MEAN regression tolerance; 0.0 = any regression rolls back (M5)
+
+  # Tail-weighted ErrorMLP loss (ADDITIVE; opt-in via `loss: tail_weighted` above or
+  # `--loss tail_weighted`). See make_loss()/tail_sample_weights() in
+  # experiments/train_error_mlp_acc.py. These defaults apply once opted in.
+  tail_lambda: 4.0              # per-sample tail up-weight: wsamp = 1 + tail_lambda * 1[||Y||_2 > tau]
+  tail_q: 0.99                  # tau = quantile(||Y_train||_2, tail_q)
+  dim_weights: {TGRCS(10): 1.0, TGRCS(15): 2.0, PEX0(17): 6.0}   # per-dim weight (name or index key); unlisted dims default 1.0
 
 eval:
   betas: [0.0, 0.25, 0.5, 0.75, 1.0]
   select_metric: "micro_mae"   # beta chosen on held-out scenarios (full corrected AR)
   step_index_ablation: true    # also run selected-beta corrected AR with step_norm zeroed
+
+# V2 unrolled multi-step (truncated-BPTT) training (ADDITIVE; error_rollout_unroll.py
+# + experiments/train_error_mlp_unroll.py). Backbone stays FROZEN; grads flow through
+# the fed-back CORRECTED continuous values into the weight-tied ErrorMLP. Trained
+# UNGATED; inference applies the existing hard gate (comparable to the one-shot baseline).
+unroll:
+  unroll_len: 25          # truncated-BPTT segment length H
+  beta: 1.0               # correction strength fed back during unrolled training
+  epochs: 8
+  lr: 0.0005              # fine-tune LR (warm-started from the one-shot error_mlp.pt)
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  scenario_batch: 128     # scenarios per truncated-BPTT mini-batch
+  warm_start: true        # init from the committed one-shot error_mlp.pt (else fresh)
 
 # Outputs go HERE (NOT the weight dirs, NOT the repo). Per cell: <out_root>/<cell>/.
 out_root: "/home/wonung/wonung_data/error_mlp_accident_out"

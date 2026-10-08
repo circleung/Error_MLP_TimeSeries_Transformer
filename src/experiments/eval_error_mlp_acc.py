@@ -56,6 +56,13 @@ def main():
     ap.add_argument("--cell", required=True)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--betas", default=None, help="comma list, overrides config")
+    ap.add_argument("--model-file", default="error_mlp.pt",
+                    help="ErrorMLP file under <out_root>/<cell>/ to evaluate "
+                         "(e.g. error_mlp_dagger.pt / error_mlp_unroll.pt).")
+    ap.add_argument("--max-scenarios", type=int, default=None,
+                    help="SMOKE ONLY: cap the number of TRAIN/TEST scenarios.")
+    ap.add_argument("--out-root", type=str, default=None,
+                    help="Override out_root (model is read from here; SMOKE isolation).")
     args = ap.parse_args()
 
     cfg = utils.load_config("error_mlp_accident")
@@ -76,8 +83,9 @@ def main():
     run_dir = cell["run_dir"]
     model, input_size = load_frozen_backbone_acc(run_dir, device)
 
-    out_dir = os.path.join(cfg["out_root"], args.cell)
-    pt = torch.load(os.path.join(out_dir, "error_mlp.pt"), map_location="cpu")
+    out_root = args.out_root if args.out_root is not None else cfg["out_root"]
+    out_dir = os.path.join(out_root, args.cell)
+    pt = torch.load(os.path.join(out_dir, args.model_file), map_location="cpu")
     in_dim = int(pt["in_dim"])
     num_controls = int(pt["num_controls"])
     step_norm_const = float(pt["step_norm_const"])
@@ -85,8 +93,13 @@ def main():
     mlp.load_state_dict(pt["state_dict"])
     mlp = mlp.to(device).eval()
 
-    with open(os.path.join(out_dir, "heldout_scenarios.json")) as f:
-        heldout_ids = [int(s) for s in json.load(f)["heldout_scenarios"]]
+    # Held-out split: prefer the model's own recorded held-out set (dagger/unroll
+    # carry the committed one-shot split); fall back to the committed json.
+    if pt.get("heldout_scenarios"):
+        heldout_ids = [int(s) for s in pt["heldout_scenarios"]]
+    else:
+        with open(os.path.join(cfg["out_root"], args.cell, "heldout_scenarios.json")) as f:
+            heldout_ids = [int(s) for s in json.load(f)["heldout_scenarios"]]
 
     seq_len = int(cfg_data["seq_len"])
     pred_len = int(cfg_data["pred_len"])
@@ -101,7 +114,8 @@ def main():
 
     # ---- 1. Beta selection on held-out (full corrected AR over TRAIN, restricted) ----
     train_ds = AccidentWindowDataset(cell["train_csv"], seq_len=seq_len,
-                                     pred_len=pred_len, cache_dir=cache_dir)
+                                     pred_len=pred_len, cache_dir=cache_dir,
+                                     max_scenarios=args.max_scenarios)
     assert train_ds.num_controls == num_controls and train_ds.input_size == input_size
     selection_curve = {}
     for beta in betas:
@@ -114,7 +128,8 @@ def main():
 
     # ---- 2. TEST reporting per beta ----
     test_ds = AccidentWindowDataset(cell["test_csv"], seq_len=seq_len,
-                                    pred_len=pred_len, cache_dir=cache_dir)
+                                    pred_len=pred_len, cache_dir=cache_dir,
+                                    max_scenarios=args.max_scenarios)
     test_curve = {}
     per_scen_by_beta = {}
     for beta in betas:
@@ -189,7 +204,12 @@ def main():
         "clearly_worked_label": clearly_worked,
     }
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "error_mlp_eval.json")
+    # Model-aware output name so non-default models never overwrite the committed
+    # one-shot error_mlp_eval.json.
+    if args.model_file == "error_mlp.pt":
+        out_path = os.path.join(out_dir, "error_mlp_eval.json")
+    else:
+        out_path = os.path.join(out_dir, f"error_mlp_eval_{os.path.splitext(args.model_file)[0]}.json")
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"[{args.cell}][done] wrote {out_path}")

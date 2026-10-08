@@ -115,6 +115,13 @@ def tail_metrics_from_flat(step_err, sid):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cell", required=True)
+    ap.add_argument("--model-file", default="error_mlp.pt",
+                    help="ErrorMLP file under <out_root>/<cell>/ to evaluate "
+                         "(e.g. error_mlp_dagger.pt / error_mlp_unroll.pt).")
+    ap.add_argument("--max-scenarios", type=int, default=None,
+                    help="SMOKE ONLY: cap the number of TEST scenarios.")
+    ap.add_argument("--out-root", type=str, default=None,
+                    help="Override out_root (model is read from here; SMOKE isolation).")
     args = ap.parse_args()
 
     cfg = utils.load_config("error_mlp_accident")
@@ -135,8 +142,9 @@ def main():
     run_dir = cell["run_dir"]
     model, input_size = load_frozen_backbone_acc(run_dir, device)
 
-    out_dir = os.path.join(cfg["out_root"], args.cell)
-    pt = torch.load(os.path.join(out_dir, "error_mlp.pt"), map_location="cpu")
+    out_root = args.out_root if args.out_root is not None else cfg["out_root"]
+    out_dir = os.path.join(out_root, args.cell)
+    pt = torch.load(os.path.join(out_dir, args.model_file), map_location="cpu")
     in_dim = int(pt["in_dim"])
     num_controls = int(pt["num_controls"])
     step_norm_const = float(pt["step_norm_const"])
@@ -145,7 +153,8 @@ def main():
     mlp = mlp.to(device).eval()
 
     test_ds = AccidentWindowDataset(cell["test_csv"], seq_len=seq_len,
-                                    pred_len=pred_len, cache_dir=cache_dir)
+                                    pred_len=pred_len, cache_dir=cache_dir,
+                                    max_scenarios=args.max_scenarios)
     assert test_ds.num_controls == num_controls and test_ds.input_size == input_size
 
     # ---- 1. baseline pass with gate stats (uncorrected AR + aligned g/true_g) ----
@@ -289,7 +298,14 @@ def main():
         "verdict": verdict,
     }
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "tail_analysis.json")
+    # Model-aware output name: the default one-shot model keeps the committed
+    # tail_analysis.json; other models (dagger/unroll) write a distinct file so
+    # the committed one-shot result is never overwritten.
+    if args.model_file == "error_mlp.pt":
+        out_name = "tail_analysis.json"
+    else:
+        out_name = f"tail_analysis_{os.path.splitext(args.model_file)[0]}.json"
+    out_path = os.path.join(out_dir, out_name)
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"[{args.cell}][done] wrote {out_path}")

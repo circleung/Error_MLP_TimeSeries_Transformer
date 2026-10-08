@@ -357,7 +357,7 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
                                 step_norm_const, device="cuda", gate_on="pred",
                                 num_continuous=10, collect_batch=2048,
                                 num_workers=4, restrict_scenarios=None,
-                                step_norm_scale=1.0):
+                                step_norm_scale=1.0, collect_dagger=False):
     """GATED (selective) corrected AR. Lockstep rollout where at each step the
     correction `raw + beta*e_hat` is applied ONLY where the gate fires; elsewhere
     the value is `raw`. The chosen value (corr where gated, raw otherwise) is BOTH
@@ -373,7 +373,16 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
 
     Returns (predictions_dict, true_dict) keyed by scenario id, exactly like
     autoregressive_corrected_batched_acc, so compute_micro_macro / per-step tail
-    metrics consume it unchanged."""
+    metrics consume it unchanged.
+
+    collect_dagger=True (ADDITIVE; used by Phase-2 DAgger, V1) ALSO returns
+    (X_d, Y_d, SID_d, interv): per ACTIVE step of THIS gated corrected trajectory,
+    X_d = error features, Y_d = residual (CY - raw) of the RAW backbone on the
+    corrected window (the target the ErrorMLP should predict at the corrected
+    state), SID_d = scenario id. `interv` accounts for the whole-step gate over
+    ACTIVE steps: {n_active_steps, n_fired_steps, intervention_rate}. At beta==0
+    (null-op) the gate never fires (intervention_rate == 0) and Y_d is the
+    open-loop residual, so a DAgger round at beta==0 collapses to round-0 data."""
     assert gate_on in ("pred", "true"), f"gate_on must be 'pred' or 'true', got {gate_on}"
     model = model.to(device=device, dtype=torch.float32).eval()
     if error_mlp is not None:
@@ -382,12 +391,20 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
     # Null-op assertion: beta==0 or tau==inf must be an exact baseline.
     null_op = (float(beta) == 0.0) or (not np.isfinite(tau)) or (error_mlp is None)
     do_corr = not null_op
+    need_feats = do_corr or collect_dagger
 
     predictions_dict, true_dict = defaultdict(list), defaultdict(list)
+    in_dim = in_dim_for(num_controls)
+    zero_interv = {"n_active_steps": 0, "n_fired_steps": 0, "intervention_rate": 0.0}
 
     order, init_win, cont, ctrl = _collect_pass(
         dataset, collect_batch, num_workers, restrict_scenarios)
     if len(order) == 0:
+        if collect_dagger:
+            return (predictions_dict, true_dict,
+                    np.zeros((0, in_dim), np.float32),
+                    np.zeros((0, num_continuous), np.float32),
+                    np.zeros((0,), np.int64), zero_interv)
         return predictions_dict, true_dict
 
     S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
@@ -397,23 +414,41 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
     preds = np.zeros((S, maxL, num_continuous), np.float32)
     tau_t = None if null_op else torch.as_tensor(float(tau), device=device, dtype=torch.float32)
 
+    if collect_dagger:
+        lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+        order_t = torch.tensor([int(s) for s in order], dtype=torch.int64, device=device)
+        Xd_chunks, Yd_chunks, SIDd_chunks = [], [], []
+        n_active_steps, n_fired_steps = 0, 0
+
     for t in tqdm.tqdm(range(maxL), desc="AR-roll(gated)"):
         raw = model(window)                                   # [S, 10]
-        if do_corr:
+        if need_feats:
             feats = build_error_features_acc(
                 raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
                 step_norm_const, step_norm_scale=step_norm_scale)
+        if do_corr:
             e_hat = error_mlp(feats)                           # [S, 10]
             if gate_on == "pred":
                 score = torch.linalg.vector_norm(e_hat, ord=2, dim=1)          # [S]
             else:  # 'true' = ORACLE gate on realized error
                 score = torch.linalg.vector_norm(CY_t[:, t, :] - raw, ord=2, dim=1)
-            fire = (score > tau_t).unsqueeze(1)               # [S, 1] bool
+            fire = (score > tau_t)                            # [S] bool (whole-step gate)
             corr_full = raw + beta * e_hat                    # [S, 10]
-            chosen = torch.where(fire, corr_full, raw)        # gated select
+            chosen = torch.where(fire.unsqueeze(1), corr_full, raw)  # gated select
         else:
             chosen = raw                                      # exact null-op
+            fire = None
         preds[:, t, :] = chosen.detach().cpu().numpy()
+        if collect_dagger:
+            active = t < lengths_t                            # [S] bool
+            if active.any():
+                err = CY_t[:, t, :] - raw                     # [S, 10]
+                Xd_chunks.append(feats[active].detach().cpu().numpy().astype(np.float32))
+                Yd_chunks.append(err[active].detach().cpu().numpy().astype(np.float32))
+                SIDd_chunks.append(order_t[active].detach().cpu().numpy().astype(np.int64))
+            n_active_steps += int(active.sum().item())
+            if fire is not None:
+                n_fired_steps += int((fire & active).sum().item())
         next_row = torch.cat([chosen, UY_t[:, t, :]], dim=1)  # [S, input]
         window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
 
@@ -422,6 +457,17 @@ def gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_contro
         for t in range(L):
             predictions_dict[s].append(preds[i, t])
             true_dict[s].append(CY[i, t])
+
+    if collect_dagger:
+        Xd = np.concatenate(Xd_chunks, axis=0) if Xd_chunks else np.zeros((0, in_dim), np.float32)
+        Yd = np.concatenate(Yd_chunks, axis=0) if Yd_chunks else np.zeros((0, num_continuous), np.float32)
+        SIDd = np.concatenate(SIDd_chunks, axis=0) if SIDd_chunks else np.zeros((0,), np.int64)
+        interv = {
+            "n_active_steps": n_active_steps, "n_fired_steps": n_fired_steps,
+            "intervention_rate": (float(n_fired_steps) / float(n_active_steps)
+                                  if n_active_steps > 0 else 0.0),
+        }
+        return predictions_dict, true_dict, Xd, Yd, SIDd, interv
     return predictions_dict, true_dict
 
 
@@ -627,3 +673,300 @@ def var_gated_corrected_rollout_acc(model, error_mlp, beta, dataset, num_control
         "per_var_rate": per_var_rate,
     }
     return predictions_dict, true_dict, interv
+
+
+# ---------------------------------------------------------------------------
+# OOD-AWARE (Mahalanobis-gated) selective tail-correction (ADDITIVE; used only by
+# experiments/ood_aware_gate.py). A STRICT TIGHTENING of gated_corrected_rollout_acc:
+# a step's correction fires only if the predicted-error gate fires AND the ErrorMLP
+# INPUT feature z_t is in-distribution (Mahalanobis D_M(z_t) <= tau_ood). The OOD
+# gate can only SUPPRESS corrections, never create one, so the beta=0 / tau=inf
+# null-op is preserved byte-for-byte. Does NOT touch any function above.
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+def ood_gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_controls,
+                                    step_norm_const, ood_mu, ood_std, ood_sigma_inv,
+                                    tau_ood, device="cuda", gate_on="pred",
+                                    num_continuous=10, collect_batch=2048, num_workers=4,
+                                    restrict_scenarios=None, step_norm_scale=1.0):
+    """OOD-AWARE gated corrected AR. At each rollout step the correction
+    `raw + beta*e_hat` is applied ONLY where BOTH gates fire; elsewhere `raw`:
+        (i)  predicted-error gate: ||e_hat||_2 > tau   (gate_on='pred'; the existing
+             step gate) [or the ORACLE ||CY-raw||_2 > tau for gate_on='true'], AND
+        (ii) in-distribution:      D_M(z_t) <= tau_ood, where z_t is the ErrorMLP
+             INPUT feature (`feats`) and
+                 D_M(z) = sqrt( u^T Sigma_inv u ),  u = (z - mu) / std
+             (std=None -> no standardization). `ood_mu` [in_dim], `ood_std` [in_dim]
+             or None, `ood_sigma_inv` [in_dim, in_dim] (inverse of the REGULARIZED
+             covariance in the standardized space). Fit on the corrector's TRAIN
+             features; tau_ood = high percentile of the in-distribution D_M.
+    Where D_M(z_t) > tau_ood the step ABSTAINS (uses raw = beta-0), even if the
+    predicted-error gate fired. The chosen row (corr where BOTH fire, raw otherwise)
+    is BOTH fed back AND reported.
+
+    Null-op contract: beta==0 or tau==+inf or error_mlp is None => the correction
+    branch is skipped entirely => byte-identical uncorrected baseline AR. The OOD
+    gate only SUPPRESSES corrections (fire is a subset of the predicted-error gate),
+    so it can never break the null-op.
+
+    Returns (predictions_dict, true_dict, abstain) keyed by scenario id (same dict
+    path as gated_corrected_rollout_acc, so the shared per-step tail metric consumes
+    (predictions_dict, true_dict) unchanged). `abstain` accounts over ACTIVE steps:
+        n_active_steps    : active (scenario, step) count
+        n_ood             : D_M > tau_ood (flagged OOD) -> abstained
+        n_pred_fire       : predicted-error gate fired (BEFORE the OOD veto)
+        n_fire            : BOTH gates fired (correction actually applied)
+        n_suppressed      : pred_fire AND OOD (corrections vetoed by the OOD gate)
+        ood_abstain_rate  : n_ood / n_active_steps  (fraction of steps flagged OOD)
+        gate_fire_rate    : n_fire / n_active_steps (fraction actually corrected)
+        vanilla_fire_rate : n_pred_fire / n_active_steps (fraction the vanilla gate
+                            would have corrected)
+        suppression_rate  : n_suppressed / n_pred_fire (fraction of vanilla-gate
+                            corrections vetoed as OOD)
+    """
+    assert gate_on in ("pred", "true"), f"gate_on must be 'pred' or 'true', got {gate_on}"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    if error_mlp is not None:
+        error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    null_op = (float(beta) == 0.0) or (not np.isfinite(tau)) or (error_mlp is None)
+    do_corr = not null_op
+
+    mu_t = torch.as_tensor(np.asarray(ood_mu, np.float32), device=device)
+    std_t = (torch.as_tensor(np.asarray(ood_std, np.float32), device=device)
+             if ood_std is not None else None)
+    sinv_t = torch.as_tensor(np.asarray(ood_sigma_inv, np.float32), device=device)
+    tau_ood_f = float(tau_ood)
+
+    predictions_dict, true_dict = defaultdict(list), defaultdict(list)
+    zero_abstain = {"n_active_steps": 0, "n_ood": 0, "n_pred_fire": 0, "n_fire": 0,
+                    "n_suppressed": 0, "ood_abstain_rate": 0.0, "gate_fire_rate": 0.0,
+                    "vanilla_fire_rate": 0.0, "suppression_rate": 0.0}
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        return predictions_dict, true_dict, zero_abstain
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    CY_t = torch.from_numpy(CY).to(device) if (do_corr and gate_on == "true") else None
+    lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+    preds = np.zeros((S, maxL, num_continuous), np.float32)
+    tau_t = None if null_op else torch.as_tensor(float(tau), device=device, dtype=torch.float32)
+
+    n_active_steps = n_ood = n_pred_fire = n_fire = n_suppressed = 0
+
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(ood-gated)"):
+        raw = model(window)                                   # [S, 10]
+        active = t < lengths_t                                # [S] bool
+        if do_corr:
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                           # [S, 10]
+            if gate_on == "pred":
+                score = torch.linalg.vector_norm(e_hat, ord=2, dim=1)          # [S]
+            else:  # 'true' = ORACLE gate on realized error
+                score = torch.linalg.vector_norm(CY_t[:, t, :] - raw, ord=2, dim=1)
+            pred_fire = score > tau_t                          # [S] predicted-error gate
+            u = feats - mu_t
+            if std_t is not None:
+                u = u / std_t
+            dm = torch.sqrt(((u @ sinv_t) * u).sum(dim=1).clamp_min(0))  # [S] D_M(z_t)
+            ood = dm > tau_ood_f                               # [S] out-of-distribution
+            fire = pred_fire & (~ood)                          # BOTH gates
+            corr_full = raw + beta * e_hat                     # [S, 10]
+            chosen = torch.where(fire.unsqueeze(1), corr_full, raw)
+            # accounting over ACTIVE steps
+            n_active_steps += int(active.sum().item())
+            n_ood += int((ood & active).sum().item())
+            n_pred_fire += int((pred_fire & active).sum().item())
+            n_fire += int((fire & active).sum().item())
+            n_suppressed += int((pred_fire & ood & active).sum().item())
+        else:
+            chosen = raw                                       # exact null-op
+            n_active_steps += int(active.sum().item())
+        preds[:, t, :] = chosen.detach().cpu().numpy()
+        next_row = torch.cat([chosen, UY_t[:, t, :]], dim=1)   # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    for i, s in enumerate(order):
+        L = lengths[i]
+        for t in range(L):
+            predictions_dict[s].append(preds[i, t])
+            true_dict[s].append(CY[i, t])
+
+    abstain = {
+        "n_active_steps": n_active_steps, "n_ood": n_ood, "n_pred_fire": n_pred_fire,
+        "n_fire": n_fire, "n_suppressed": n_suppressed,
+        "ood_abstain_rate": (float(n_ood) / n_active_steps if n_active_steps > 0 else 0.0),
+        "gate_fire_rate": (float(n_fire) / n_active_steps if n_active_steps > 0 else 0.0),
+        "vanilla_fire_rate": (float(n_pred_fire) / n_active_steps if n_active_steps > 0 else 0.0),
+        "suppression_rate": (float(n_suppressed) / n_pred_fire if n_pred_fire > 0 else 0.0),
+    }
+    return predictions_dict, true_dict, abstain
+
+
+# ---------------------------------------------------------------------------
+# PHYSICS-PLAUSIBILITY-CONSTRAINED selective tail-correction (ADDITIVE; used only
+# by experiments/physics_constrained_gate.py). Roadmap step #2 / method B4. Before
+# a GATED correction is fed back, its 10-dim continuous vector is PROJECTED onto a
+# physically plausible set fit from TRAIN:
+#     corr <- clip(clip(raw + beta*e_hat, lo, hi), prev - dmax, prev + dmax)
+#   (i)  BOUNDS: clip each variable k to [lo_k, hi_k] (per-variable TRAIN range);
+#   (ii) RATE LIMIT: cap the per-step change to |corr_k - prev_k| <= dmax_k, where
+#        prev_k = the last fed continuous value (window[:, -1, :10]) and dmax_k is a
+#        high percentile of the per-variable |y_t - y_{t-1}| seen in TRAIN.
+# The projection is applied ONLY to the value that is actually fed back where the
+# gate fires (raw elsewhere), so a step that does not fire -- and, in particular,
+# beta==0 / tau==inf -- is the byte-identical uncorrected baseline (null-op). The
+# existing predicted-error gate and, optionally, the A1 OOD (Mahalanobis) gate
+# select WHERE to correct; physics constrains HOW LARGE the fed-back correction can
+# be, capping the OOD blowups the gates miss. Does NOT touch any function above.
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+def physics_gated_corrected_rollout_acc(model, error_mlp, beta, tau, dataset, num_controls,
+                                        step_norm_const, phys_lo, phys_hi, phys_dmax,
+                                        ood_mu=None, ood_std=None, ood_sigma_inv=None,
+                                        tau_ood=None, device="cuda", gate_on="pred",
+                                        num_continuous=10, collect_batch=2048, num_workers=4,
+                                        restrict_scenarios=None, step_norm_scale=1.0):
+    """PHYSICS-CONSTRAINED gated corrected AR. At each rollout step the correction
+    `raw + beta*e_hat` is applied ONLY where the gate(s) fire; the fed-back/reported
+    value there is the PROJECTED correction:
+        corr_proj = clip(clip(raw + beta*e_hat, lo, hi), prev - dmax, prev + dmax)
+    where prev = window[:, -1, :num_continuous] (the last fed continuous value),
+    `phys_lo`/`phys_hi`/`phys_dmax` are per-variable [num_continuous] arrays (TRAIN-
+    fit bounds + max step size). Elsewhere the value is `raw`.
+
+    Gates (a step fires where BOTH hold):
+        (i)  predicted-error gate: ||e_hat||_2 > tau (gate_on='pred'; the existing
+             step gate) [or the ORACLE ||CY-raw||_2 > tau for gate_on='true'];
+        (ii) OPTIONAL A1 OOD gate: if `ood_mu` is not None, additionally require the
+             ErrorMLP INPUT feature z_t to be in-distribution, D_M(z_t) <= tau_ood,
+             D_M(z) = sqrt(u^T Sigma_inv u), u = (z-mu)/std. `ood_mu` is None => no
+             OOD gate (physics composes with the vanilla predicted-error gate only).
+
+    Null-op contract: beta==0 or tau==+inf or error_mlp is None => the correction
+    branch is skipped entirely => byte-identical uncorrected baseline AR. The
+    projection only reshapes the fired correction (never raw), so it can never break
+    the null-op. (Asserted by the caller via the beta=0 baseline == open-loop mean.)
+
+    Returns (predictions_dict, true_dict, stats) keyed by scenario id (same dict path
+    as gated_corrected_rollout_acc). `stats` accounts over ACTIVE steps:
+        n_active_steps, n_pred_fire (predicted-error gate), n_ood (D_M > tau_ood; 0 if
+        no OOD gate), n_fire (both gates -> correction applied), n_suppressed
+        (pred_fire AND OOD), n_proj_clipped (fired steps whose projection changed at
+        least one variable), plus ood_abstain_rate / gate_fire_rate / vanilla_fire_rate
+        / suppression_rate / proj_clip_rate (n_proj_clipped / n_fire) and use_ood_gate.
+    """
+    assert gate_on in ("pred", "true"), f"gate_on must be 'pred' or 'true', got {gate_on}"
+    model = model.to(device=device, dtype=torch.float32).eval()
+    if error_mlp is not None:
+        error_mlp = error_mlp.to(device=device, dtype=torch.float32).eval()
+
+    null_op = (float(beta) == 0.0) or (not np.isfinite(tau)) or (error_mlp is None)
+    do_corr = not null_op
+    use_ood = ood_mu is not None
+
+    lo_t = torch.as_tensor(np.asarray(phys_lo, np.float32), device=device)      # [10]
+    hi_t = torch.as_tensor(np.asarray(phys_hi, np.float32), device=device)      # [10]
+    dmax_t = torch.as_tensor(np.asarray(phys_dmax, np.float32), device=device)  # [10]
+
+    if use_ood:
+        mu_t = torch.as_tensor(np.asarray(ood_mu, np.float32), device=device)
+        std_t = (torch.as_tensor(np.asarray(ood_std, np.float32), device=device)
+                 if ood_std is not None else None)
+        sinv_t = torch.as_tensor(np.asarray(ood_sigma_inv, np.float32), device=device)
+        tau_ood_f = float(tau_ood)
+
+    predictions_dict, true_dict = defaultdict(list), defaultdict(list)
+    zero_stats = {"n_active_steps": 0, "n_pred_fire": 0, "n_ood": 0, "n_fire": 0,
+                  "n_suppressed": 0, "n_proj_clipped": 0, "ood_abstain_rate": 0.0,
+                  "gate_fire_rate": 0.0, "vanilla_fire_rate": 0.0, "suppression_rate": 0.0,
+                  "proj_clip_rate": 0.0, "use_ood_gate": bool(use_ood)}
+
+    order, init_win, cont, ctrl = _collect_pass(
+        dataset, collect_batch, num_workers, restrict_scenarios)
+    if len(order) == 0:
+        return predictions_dict, true_dict, zero_stats
+
+    S, lengths, maxL, W, CY, UY = _pack(order, init_win, cont, ctrl, num_continuous, num_controls)
+    window = torch.from_numpy(W).to(device)
+    UY_t = torch.from_numpy(UY).to(device)
+    CY_t = torch.from_numpy(CY).to(device) if (do_corr and gate_on == "true") else None
+    lengths_t = torch.from_numpy(lengths.astype(np.int64)).to(device)
+    preds = np.zeros((S, maxL, num_continuous), np.float32)
+    tau_t = None if null_op else torch.as_tensor(float(tau), device=device, dtype=torch.float32)
+
+    n_active_steps = n_pred_fire = n_ood = n_fire = n_suppressed = n_proj_clipped = 0
+
+    for t in tqdm.tqdm(range(maxL), desc="AR-roll(phys-gated)"):
+        raw = model(window)                                    # [S, 10]
+        active = t < lengths_t                                 # [S] bool
+        if do_corr:
+            feats = build_error_features_acc(
+                raw, window[:, -1, :num_continuous], UY_t[:, t, :], t,
+                step_norm_const, step_norm_scale=step_norm_scale)
+            e_hat = error_mlp(feats)                            # [S, 10]
+            if gate_on == "pred":
+                score = torch.linalg.vector_norm(e_hat, ord=2, dim=1)          # [S]
+            else:  # 'true' = ORACLE gate on realized error
+                score = torch.linalg.vector_norm(CY_t[:, t, :] - raw, ord=2, dim=1)
+            pred_fire = score > tau_t                          # [S] predicted-error gate
+            if use_ood:
+                u = feats - mu_t
+                if std_t is not None:
+                    u = u / std_t
+                dm = torch.sqrt(((u @ sinv_t) * u).sum(dim=1).clamp_min(0))    # [S] D_M(z_t)
+                ood = dm > tau_ood_f                           # [S] out-of-distribution
+                fire = pred_fire & (~ood)                      # both gates
+            else:
+                ood = None
+                fire = pred_fire
+            corr_full = raw + beta * e_hat                     # [S, 10]
+            # physics projection: bounds then rate limit (relative to the last fed value)
+            prev = window[:, -1, :num_continuous]              # [S, 10] last fed continuous
+            corr_proj = torch.minimum(torch.maximum(corr_full, lo_t), hi_t)      # clip [lo,hi]
+            corr_proj = torch.minimum(torch.maximum(corr_proj, prev - dmax_t),
+                                      prev + dmax_t)                            # rate limit
+            chosen = torch.where(fire.unsqueeze(1), corr_proj, raw)
+            # accounting over ACTIVE steps
+            n_active_steps += int(active.sum().item())
+            n_pred_fire += int((pred_fire & active).sum().item())
+            if use_ood:
+                n_ood += int((ood & active).sum().item())
+                n_suppressed += int((pred_fire & ood & active).sum().item())
+            n_fire += int((fire & active).sum().item())
+            proj_changed = (corr_proj != corr_full).any(dim=1)  # [S] projection altered value
+            n_proj_clipped += int((fire & active & proj_changed).sum().item())
+        else:
+            chosen = raw                                       # exact null-op
+            n_active_steps += int(active.sum().item())
+        preds[:, t, :] = chosen.detach().cpu().numpy()
+        next_row = torch.cat([chosen, UY_t[:, t, :]], dim=1)   # [S, input]
+        window = torch.cat([window[:, 1:, :], next_row[:, None, :]], dim=1)
+
+    for i, s in enumerate(order):
+        L = lengths[i]
+        for t in range(L):
+            predictions_dict[s].append(preds[i, t])
+            true_dict[s].append(CY[i, t])
+
+    stats = {
+        "n_active_steps": n_active_steps, "n_pred_fire": n_pred_fire, "n_ood": n_ood,
+        "n_fire": n_fire, "n_suppressed": n_suppressed, "n_proj_clipped": n_proj_clipped,
+        "ood_abstain_rate": (float(n_ood) / n_active_steps if n_active_steps > 0 else 0.0),
+        "gate_fire_rate": (float(n_fire) / n_active_steps if n_active_steps > 0 else 0.0),
+        "vanilla_fire_rate": (float(n_pred_fire) / n_active_steps if n_active_steps > 0 else 0.0),
+        "suppression_rate": (float(n_suppressed) / n_pred_fire if n_pred_fire > 0 else 0.0),
+        "proj_clip_rate": (float(n_proj_clipped) / n_fire if n_fire > 0 else 0.0),
+        "use_ood_gate": bool(use_ood),
+    }
+    return predictions_dict, true_dict, stats

@@ -1,0 +1,82 @@
+# Plan #4 -- Backbone AR-aware fine-tune config (warm-start, do-no-harm).
+#
+# ADDITIVE. Cells / data / per-cell run_dir + train/test csv + step_norm_const are
+# REUSED from error_mlp_accident.yaml (single source of truth); this file only holds
+# the AR-aware fine-tune hyperparameters. The backbone architecture is ALWAYS read
+# from <run_dir>/config_used.yaml (never from here).
+#
+# CROWN-JEWEL SAFETY: lr defaults to 1e-5 (>=10x below the lowest original config LR,
+# SBO 1e-4). train_backbone_arbb.py OWNS its optimizer (AdamW + cosine-to-zero) and
+# NEVER calls LitRNNBaseModel.configure_optimizers (which hardcodes AdamW lr=1e-3 +
+# StepLR -> would run at 100x and destroy the backbone).
+
+warm_start: true            # load the committed per-cell ckpt, then UNFREEZE (D1)
+
+optim:
+  lr: 1.0e-5                 # D1 flat fine-tune LR. Optional sweep bound: [3e-6, 1e-5], NEVER above.
+  weight_decay: 1.0e-4
+  cosine_to_zero: true       # CosineAnnealingLR(T_max=epochs) -> 0; warmup 0
+  grad_clip_norm: 1.0
+
+epochs: 8                    # small epoch cap (Phase-0 smoke overrides with --epochs)
+
+arm: detached_ss            # 'detached_ss' (O1 default) | 'bptt' (O2 fallback)
+unroll_len: 25              # rollout horizon H. detached-ss per-step: H=25 fine.
+                            # bptt fallback: use H=5-8 (memory tax from need_weights attn).
+scenario_batch: 32          # scenarios per rollout mini-batch (peak-mem knob)
+
+# Composite loss  L = lambda_tf * single-step-TF-MSE  +  lambda_ar * traj-loss.
+# lambda_tf is the crown-jewel anchor (always plain-mean MSE on true windows).
+loss:
+  lambda_tf: 1.0
+  lambda_ar: 1.0
+  traj_loss: smoothl1        # trajectory per-step loss: smoothl1 | mse | l1
+  huber_beta: 0.01
+
+# Scheduled-sampling curriculum: P(feed model's own prediction) ramps 0 -> ss_p_end
+# linearly over epochs. p=0 == teacher forcing, p->1 == free-running.
+scheduled_sampling:
+  p_start: 0.0
+  p_end: 0.8
+
+# ---- Scope-addition knobs (ALL DEFAULT-OFF -> reduce to the core; parity/null-op
+# tests unaffected). The Phase-1 pilot sweeps these; Phase-0 keeps them off. ----
+
+# (1) Feedback-noise augmentation (train-only, detached_ss). Add eps~N(0,sigma^2) to
+# the fed-back continuous state so the model learns to recover from drifted /
+# low-density (OOD-like) states. Optional linear curriculum sigma_start -> sigma_end
+# over epochs. sigma=0.0 => no noise (default; trajectory identical to the core).
+feedback_noise_sigma: 0.0
+feedback_noise_sigma_end: null     # null => constant at feedback_noise_sigma
+
+# (2) Trajectory-loss reduction (tail/CVaR emphasis). Neutral params == plain mean.
+#   loss_reduction: 'mean' (default) | 'cvar' | 'tail_weighted'
+#   cvar_alpha:      worst-fraction for CVaR; 1.0 (default) == plain mean.
+#   tail_weight_pow: per-scenario weight = (B0_open_loop_scenario_err)^pow, normalized;
+#                    0.0 (default) == uniform == plain mean. The per-scenario baseline
+#                    error is computed ONCE from B0's open-loop rollout.
+loss_reduction: mean
+cvar_alpha: 1.0
+tail_weight_pow: 0.0
+
+# Pre-registered 3-role scenario-disjoint split of train_csv (accident_dataset
+# RandomState(42) pattern; leak-safe). fine-tune = the ONLY data fine-tuned on;
+# gate = held-out for per-epoch crown-jewel/CR readouts (never trained on); report =
+# reserved disjoint role (final reported CR/OOD uses the frozen B0-ranked TEST-tail
+# built by eval_backbone_ood --make_fixed_tail, per plan D-split).
+split:
+  seed: 42
+  finetune_frac: 0.70
+  gate_frac: 0.15
+  report_frac: 0.15
+
+# Fixed test-tail (report locus). frac of TEST scenarios ranked by B0 open-loop
+# per-scenario baseline error (built once by eval_backbone_ood, persisted to JSON).
+tail_frac: 0.10
+
+# Outputs (NEW tree; NEVER the original weight dirs). Per cell ckpt goes to
+# <out_root>/<cell>_arbb_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/
+out_root: "/home/wonung/wonung_data/error_mlp_accident_out/arbb"
+
+# Per-epoch CSV logs: results/arbb/<cell>/train_log.csv
+results_root: "results/arbb"

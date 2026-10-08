@@ -98,12 +98,17 @@ def signed_pct(x, nd=1):
     return (MINUS if x < 0 else "+") + s
 
 
-def save(fig, name):
+def save(fig, name, pad=None):
     os.makedirs(FIG_DIR, exist_ok=True)
     pdf = os.path.join(FIG_DIR, name + ".pdf")
     png = os.path.join(FIG_DIR, name + ".png")
-    fig.savefig(pdf, bbox_inches="tight")
-    fig.savefig(png, dpi=300, bbox_inches="tight")
+    # pad!=None (paper mode): leave a clean whitespace border so the panel can be
+    # cropped and captioned separately (no title baked in). Otherwise crop tight.
+    kw = dict(bbox_inches="tight")
+    if pad is not None:
+        kw["pad_inches"] = pad
+    fig.savefig(pdf, **kw)
+    fig.savefig(png, dpi=300, **kw)
     plt.close(fig)
     return pdf, png
 
@@ -111,12 +116,14 @@ def save(fig, name):
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-def load_all(out_root, cells):
+def load_all(out_root, cells, tail_file="tail_analysis.json"):
     data = {}
     for c in cells:
         cdir = os.path.join(out_root, c)
+        # No fallback on purpose: every cell must use the SAME tail_file so the
+        # figure never silently mixes methods (one-shot vs tail-loss+DAgger).
         data[c] = {
-            "tail": json.load(open(os.path.join(cdir, "tail_analysis.json"))),
+            "tail": json.load(open(os.path.join(cdir, tail_file))),
             "var": json.load(open(os.path.join(cdir, "variable_analysis.json"))),
             "ar": json.load(open(os.path.join(cdir, "ar_permutation_importance.json"))),
             "tp": json.load(open(os.path.join(cdir, "turning_point_analysis.json"))),
@@ -131,9 +138,19 @@ def load_all(out_root, cells):
 #   Cells ordered by descending p99 reduction (computed, not hardcoded).
 # tail_analysis.json: baseline.{p99,mean}, operating_point_strict.{p99,mean,p99_reduction_pct}
 # ---------------------------------------------------------------------------
-def fig1(data, cells):
+def fig1(data, cells, paper=False, val_op=None):
     rows = []
     for c in cells:
+        if val_op is not None:                       # validation-selected op, test eval
+            v = val_op[c]
+            rows.append({
+                "cell": c,
+                "base_p99": v["baseline_p99"], "op_p99": v["op_p99"],
+                "base_mean": v["baseline_mean"], "op_mean": v["op_mean"],
+                "p99_red": v["red_pct"],
+                "mean_delta_pct": -v["mean_red_pct"],   # delta = op-base = -(reduction)
+            })
+            continue
         t = data[c]["tail"]
         b, op = t["baseline"], t["operating_point_strict"]
         rows.append({
@@ -185,10 +202,13 @@ def fig1(data, cells):
     ax1.set_ylim(0, mmax * 1.20)
     ygrid(ax1)
 
-    fig.suptitle("Selective gated correction cuts the p99 error tail while keeping "
-                 "the mean flat", fontsize=10, y=1.02)
+    if not paper:
+        fig.suptitle("Selective gated correction cuts the p99 error tail while keeping "
+                     "the mean flat", fontsize=10, y=1.02)
     fig.tight_layout()
-    return save(fig, "fig1_tail_gating")
+    # paper mode: no baked title, clean whitespace border -> crop + \caption in LaTeX.
+    return save(fig, "fig1_tail_gating_paper" if paper else "fig1_tail_gating",
+                pad=0.25 if paper else None)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +218,7 @@ def fig1(data, cells):
 # tail_analysis.json: baseline.mean (=beta 0), global_beta[...].mean,
 #   gated_pred["beta=0.5,q=0.1"], baseline/global/gated {mean,p99}
 # ---------------------------------------------------------------------------
-def fig2(data, cells):
+def fig2(data, cells, paper=False):
     betas = [0.0, 0.25, 0.5, 0.75, 1.0]
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(7.0, 3.3))
 
@@ -255,10 +275,12 @@ def fig2(data, cells):
     ax1.legend(frameon=False, loc="upper left")
     ygrid(ax1)
 
-    fig.suptitle("Uniform global correction hurts; selective (gated) correction is "
-                 "the only win", fontsize=10, y=1.02)
+    if not paper:
+        fig.suptitle("Uniform global correction hurts; selective (gated) correction is "
+                     "the only win", fontsize=10, y=1.02)
     fig.tight_layout()
-    return save(fig, "fig2_global_vs_selective")
+    return save(fig, "fig2_global_vs_selective_paper" if paper else "fig2_global_vs_selective",
+                pad=0.25 if paper else None)
 
 
 # ---------------------------------------------------------------------------
@@ -430,15 +452,45 @@ def fig5(data, cells):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--figs", default="1,2,3,4,5",
+                    help="comma list of figures to render (default all).")
+    ap.add_argument("--paper", action="store_true",
+                    help="fig1/2 only: no baked suptitle + whitespace border (crop + "
+                         "\\caption yourself); default tail json -> tail-loss+DAgger.")
+    ap.add_argument("--tail-file", default=None,
+                    help="per-cell tail json to load (default: tail_analysis.json, or "
+                         "tail_analysis_error_mlp_dagger.json in --paper mode).")
+    ap.add_argument("--val-op", default=None,
+                    help="fig1/3 only: op_val_select_summary.json (validation-selected, "
+                         "frozen, test-evaluated operating point). Overrides the tail json op.")
+    args = ap.parse_args()
+
     set_style()
     cfg = utils.load_config("error_mlp_accident")
     out_root = cfg["out_root"]
     cells = list(cfg["cells"].keys())
-    data = load_all(out_root, cells)
+    tail_file = args.tail_file or (
+        "tail_analysis_error_mlp_dagger.json" if args.paper else "tail_analysis.json")
+    data = load_all(out_root, cells, tail_file=tail_file)
 
+    val_op = None
+    if args.val_op:
+        vo = json.load(open(args.val_op))
+        val_op = {r["cell"]: r["test"] for r in vo}   # cell -> test block
+
+    want = [k.strip() for k in args.figs.split(",") if k.strip()]
+    registry = {"1": fig1, "2": fig2, "3": fig3, "4": fig4, "5": fig5}
     written = []
-    for fn in (fig1, fig2, fig3, fig4, fig5):
-        written.extend(fn(data, cells))
+    for k in want:
+        fn = registry[k]
+        if k == "1":
+            written.extend(fn(data, cells, paper=args.paper, val_op=val_op))
+        elif k == "2":
+            written.extend(fn(data, cells, paper=args.paper))
+        else:
+            written.extend(fn(data, cells))
 
     print(f"figures dir: {FIG_DIR}")
     ok = True

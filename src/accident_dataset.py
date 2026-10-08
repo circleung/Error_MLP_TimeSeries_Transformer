@@ -126,8 +126,9 @@ class AccidentWindowDataset(Dataset):
         assert not missing, f"{csv_path} missing configured columns: {missing}"
         assert int(df.isnull().sum().sum()) == 0, f"{csv_path} contains nulls"
 
-        if max_scenarios is not None:
-            keep = pd.unique(df[METADATA_COLS[0]])[: int(max_scenarios)]
+        self.max_scenarios = None if max_scenarios is None else int(max_scenarios)
+        if self.max_scenarios is not None:
+            keep = pd.unique(df[METADATA_COLS[0]])[: self.max_scenarios]
             df = df[df[METADATA_COLS[0]].isin(keep)].reset_index(drop=True)
 
         self._feats = df[self.feature_cols].to_numpy(dtype=np.float32)          # [N, input]
@@ -143,7 +144,12 @@ class AccidentWindowDataset(Dataset):
         return os.path.join(cache_dir, f"{base}_{tag}_s{self.seq_len}_p{self.pred_len}.cache")
 
     def _arrange_indexes(self, cache_dir: Optional[str]) -> List[int]:
-        if cache_dir:
+        # The on-disk cache is keyed only by (csv, seq_len, pred_len); a capped
+        # (max_scenarios) dataset has DIFFERENT valid indices for the same csv, so
+        # bypass the cache entirely when capped (smoke-only path). The full-data
+        # path (max_scenarios is None) is unchanged -> committed behavior preserved.
+        use_cache = bool(cache_dir) and self.max_scenarios is None
+        if use_cache:
             cache_path = self._cache_path(cache_dir)
             if os.path.exists(cache_path):
                 with open(cache_path, "rb") as f:
@@ -159,7 +165,7 @@ class AccidentWindowDataset(Dataset):
             if scen[i] == scen[i + span - 1] and np.all(scen[i:i + span] == scen[i]):
                 valid.append(i)
 
-        if cache_dir:
+        if use_cache:
             with open(self._cache_path(cache_dir), "wb") as f:
                 pickle.dump(valid, f)
         return valid
