@@ -29,3 +29,46 @@ __pycache__/
 
 # --- archives ---
 *.zip
+
+# Project-local NVIDIA userspace compatibility libraries (not source)
+.runtime/
+
+# Journal pilot rollout dumps (regenerable, ~9MB each)
+paper/journal/pilots/**/*.npz
+
+# ======================================================================
+# Repository scope: core model / ErrorMLP / scheduled-sampling code only.
+# Papers, notes, figures, notebooks and analysis outputs stay local.
+# ======================================================================
+paper/
+docs/
+figures/
+data/
+scripts/
+weights/
+*.ipynb
+*.pdf
+*.npz
+.runtime/
+src/results/
+src/custom_transformers/
+
+# src/experiments: whitelist the core pipeline only
+src/experiments/*
+!src/experiments/__init__.py
+!src/experiments/tail_analysis_acc.py
+!src/experiments/train_error_mlp_acc.py
+!src/experiments/eval_error_mlp_acc.py
+!src/experiments/op_val_select_test_eval.py
+!src/experiments/plot_trajectories.py
+!src/experiments/plot_before_after.py
+!src/experiments/plot_cell_metrics.py
+!src/experiments/train_backbone_arbb.py
+!src/experiments/eval_backbone_ood.py
+!src/experiments/train_backbone_ss_scratch.py
+!src/experiments/ss_scratch_4way_eval.py
+!src/experiments/plot_4way_pex.py
+
+# configs: drop the unified-60min ErrorMLP config (not part of the per-accident pipeline)
+src/configs/error_mlp.yaml
+!weights_manifest.csv
