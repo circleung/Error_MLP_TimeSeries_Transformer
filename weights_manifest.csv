@@ -1,0 +1,17 @@
+path,role,cell,source,size_bytes,sha256_16
+weights/backbones/LLOCA_CSP_seq50_pred1/config_used.yaml,backbone,LLOCA_CSP,ABC-Transformer,656,21095f4e2b027d49
+weights/backbones/LLOCA_CSP_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=11-val_loss=0.00001009-step=236844.ckpt,backbone,LLOCA_CSP,ABC-Transformer,10169606,ee285ba2a29076ec
+weights/backbones/LLOCA_ECSBS_seq50_pred1/config_used.yaml,backbone,LLOCA_ECSBS,ABC-Transformer,664,87ae5ae6a053e1aa
+weights/backbones/LLOCA_ECSBS_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=7-val_loss=0.00001206-step=157896.ckpt,backbone,LLOCA_ECSBS,ABC-Transformer,10169606,d91c9ad9481b18e2
+weights/backbones/SBO_seq50_pred1/config_used.yaml,backbone,SBO,ABC-Transformer,598,0157982178542db7
+weights/backbones/SBO_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=12-val_loss=0.00001509-step=503568.ckpt,backbone,SBO,ABC-Transformer,2565190,90b2d22437f7077c
+weights/backbones/TLOFW_CSP_seq50_pred1/config_used.yaml,backbone,TLOFW_CSP,ABC-Transformer,661,52359cd31a0464b5
+weights/backbones/TLOFW_CSP_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=10-val_loss=0.00000837-step=217019.ckpt,backbone,TLOFW_CSP,ABC-Transformer,4099142,644ee7c7ca798270
+weights/backbones/TLOFW_ECSBS_seq50_pred1/config_used.yaml,backbone,TLOFW_ECSBS,ABC-Transformer,649,7a05f4ba197661ef
+weights/backbones/TLOFW_ECSBS_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=7-val_loss=0.00001033-step=157896.ckpt,backbone,TLOFW_ECSBS,ABC-Transformer,4099270,102a4f573a6f86bc
+weights/error_mlp/LLOCA_CSP/error_mlp_dagger.pt,error_mlp_dagger,LLOCA_CSP,this-repo,30242,1966161adcd9d66a
+weights/error_mlp/LLOCA_ECSBS/error_mlp_dagger.pt,error_mlp_dagger,LLOCA_ECSBS,this-repo,30242,7253952225d234e5
+weights/error_mlp/op_val_select_summary.json,operating_point,all,this-repo,3972,f6378aeb9a817e8a
+weights/error_mlp/SBO/error_mlp_dagger.pt,error_mlp_dagger,SBO,this-repo,31778,3269f61ff27daa5f
+weights/error_mlp/TLOFW_CSP/error_mlp_dagger.pt,error_mlp_dagger,TLOFW_CSP,this-repo,30498,b966854454f9e536
+weights/error_mlp/TLOFW_ECSBS/error_mlp_dagger.pt,error_mlp_dagger,TLOFW_ECSBS,this-repo,30498,54946fe2a7e8bc0c

@@ -1,171 +1,263 @@
-# TimeSeries Data Analysis For Accident Prediction
+# Error-MLP: Selective Autoregressive Error Correction for ABC-Transformer
 
-Model weights link: https://drive.google.com/drive/folders/1IhY1foMvVT7yi7Au6Y9wvYNjc8dRdHHp?usp=drive_link
+Follow-up to **[ABC-Transformer](https://github.com/POSTECH-NINE/abc-transformer)**, the
+decoder-only Transformer surrogate for severe-accident progression. ABC-Transformer is trained
+one step ahead (teacher forcing) and deployed as an autoregressive (AR) rollout. In the rollout,
+small one-step errors are fed back and occasionally compound into large deviations.
 
-### Dataset Description
+This repository keeps the ABC-Transformer backbone **frozen** and attaches a small
+**Error-MLP corrector** that predicts the backbone's next-step error. The corrector is applied only on the
+few rollout steps where it predicts a large error. The goal is to cut the **rare, large (tail) AR errors**
+without hurting the average accuracy of an already strong backbone.
 
-The dataset columns look like:
+Covered: the five APR1400 per-accident backbones released with ABC-Transformer.
+These are **SBO**, **LLOCA-CSP**, **LLOCA-ECSBS**, **TLOFW-CSP** and **TLOFW-ECSBS**
+(Δt = 5 min, lookback k = 50, 10 continuous channels plus 4–5 SAMG binaries as known inputs).
+
+Model weights: **[Google Drive folder](https://drive.google.com/drive/folders/1IhY1foMvVT7yi7Au6Y9wvYNjc8dRdHHp?usp=drive_link)**
+(see `weights_manifest.csv` for the index and checksums).
+
+---
+
+## 1. Role of this repository
+
+| | ABC-Transformer (parent repo) | This repo (follow-up) |
+|---|---|---|
+| Question | Can a Transformer emulate MAAP accident trajectories? | Can the AR rollout's *rare large errors* be suppressed without retraining? |
+| Model | Decoder-only backbone, trained end to end | Same backbone, frozen, plus Error-MLP corrector and gate |
+| Main metric | Mean MAE / RMSE over the rollout | **Tail** of per-step error (p99, worst scenarios), with mean as a do-no-harm guard |
+| Exposure-bias fix | Scheduled sampling on OPR1000 (`train_ss.py`) | Post-hoc correction (DAgger-trained) and scheduled sampling on the APR1400 SBO backbone |
+
+---
+
+## 2. Method
+
+### 2.1 Error-MLP corrector
+
+For rollout step $t$ the frozen backbone predicts $\hat y_t$. The corrector $g_\phi$ predicts the
+backbone's one-step error from
+
+$$z_t = [\hat y_t\ (10),\ \text{last observed continuous state}\ (10),\ \text{current controls}\ (4\text{–}5),\ t/1000]$$
+
+It is trained on the target $y_t - \hat y_t$ with a tail-weighted SmoothL1 loss. The training data is collected on the
+corrector's own rollout distribution with **2-round DAgger** (`error_mlp_dagger.pt`). The
+corrected value is **fed back into the window**, so a correction also stops error accumulation.
+
+### 2.2 Selective (gated) correction
+
+$$\hat y^{\text{corr}}_t = \hat y_t + \mathbb 1\big[\lVert g_\phi(z_t)\rVert_2 > \tau\big]\cdot\beta\, g_\phi(z_t)$$
+
+The correction is applied only when the predicted error norm exceeds a threshold τ. At β = 0 the
+rollout is bit-identical to the baseline, which serves as a built-in null check.
+Correcting *every* step (global correction) adds noise to the many easy steps of a strong
+backbone. Global correction worsens the mean monotonically in β in all five cells; for SBO at β = 0.5 the mean rises
+by +150% and p99 by +30%. Gating avoids this.
+
+### 2.3 Operating-point protocol (test-clean)
+
+1. Candidate grid: β ∈ {0.5, 1.0} × nominal gate fraction q ∈ {0.005, 0.01, 0.02, 0.05, 0.10}.
+2. **Select on validation** (held-out training scenarios the corrector never saw):
+   minimise p99 subject to mean ≤ baseline mean.
+3. **Freeze** τ\* from validation and evaluate **once** on the test set.
+
+The frozen operating points ship in `weights/error_mlp/op_val_select_summary.json`.
+
+### 2.4 Scheduled-sampling backbone (APR1400 SBO)
+
+`src/experiments/train_backbone_ss_scratch.py` retrains the SBO backbone **from scratch** with
+scheduled sampling, keeping the original architecture, optimizer and update budget:
+
+- detached feedback with unroll H = 10;
+- feedback probability ramped 0 → 0.5;
+- checkpoint selected on validation AR MAE.
+
+`ss_scratch_4way_eval.py` then compares four arms on the same test set: baseline,
+baseline + Error-MLP, SS backbone and SS backbone + Error-MLP.
+Warm-start AR-aware fine-tuning of the existing backbone (`train_backbone_arbb.py`) was also
+tested and found to **worsen** AR error (+30% to +336% AR-MAE on TLOFW-CSP, 7 configurations).
+The converged backbone sits at a fragile AR optimum, which is why the scheduled-sampling backbone is trained from scratch.
+
+---
+
+## 3. Results (TEST, validation-selected frozen operating point)
+
+All results use the adopted DAgger corrector at the frozen operating point of each cell (Section 2.3).
+
+### 3.1 Mean accuracy: MAE / RMSE before and after
+
+The metric definitions match ABC-Transformer: macro over test scenarios and 10 continuous channels, with
+RMSE taking the root inside the time average. Units are normalized (0.1–0.9).
+
+| Cell | test scen. | MAE baseline → Error-MLP | Δ | RMSE baseline → Error-MLP | Δ |
+|---|---|---|---|---|---|
+| SBO | 3,000 | 0.01455 → 0.01200 | **−17.5%** | 0.02315 → 0.01901 | **−17.9%** |
+| LLOCA-CSP | 1,500 | 0.00899 → 0.00755 | **−16.0%** | 0.01791 → 0.01512 | **−15.6%** |
+| LLOCA-ECSBS | 1,500 | 0.00740 → 0.00675 | −8.8% | 0.01193 → 0.01088 | −8.8% |
+| TLOFW-CSP | 1,500 | 0.01273 → 0.01203 | −5.4% | 0.02487 → 0.02354 | −5.3% |
+| TLOFW-ECSBS | 1,500 | 0.01231 → 0.01140 | −7.3% | 0.02004 → 0.01830 | −8.7% |
+
+![MAE and RMSE, baseline vs Error-MLP, five cells](assets/fig_metrics_mae_rmse.png)
+
+Per variable (SBO), every channel improves. The largest gains are on the variables that drive the
+worst scenarios: `ZWRB(6)` −30.3%, `PEX0(17)` −26.8%, `TGRB(17)` −22.6%, `ZWRB(1)` −22.8%.
+The hot-leg gas temperature `TGRCS(15)`, the hardest output, improves least (−3.7%).
+
+![SBO per-variable MAE](assets/fig_metrics_pervar_SBO.png)
+
+### 3.2 Tail error: p99 and worst scenarios
+
+Per-step error $e_{s,t} = \frac1{10}\sum_k |\hat y_{s,t,k} - y_{s,t,k}|$, pooled over all
+scenarios and steps (normalized 0.1–0.9 units). "Fire rate" is the realized fraction of test steps the
+gate corrected.
+
+| Cell | β\* | q\* | p99 baseline → gated | **p99 Δ** | mean baseline → gated | mean Δ | worst-10 scen. Δ | fire rate |
+|---|---|---|---|---|---|---|---|---|
+| SBO | 0.5 | 0.10 | 0.0895 → 0.0570 | **−36.3%** | 0.01455 → 0.01200 | −17.5% | −25.4% | 0.27% |
+| LLOCA-CSP | 1.0 | 0.10 | 0.0455 → 0.0330 | **−27.4%** | 0.00899 → 0.00755 | −16.0% | −37.3% | 0.22% |
+| LLOCA-ECSBS | 1.0 | 0.05 | 0.0409 → 0.0348 | **−14.9%** | 0.00740 → 0.00675 | −8.8% | −48.0% | 0.45% |
+| TLOFW-CSP | 1.0 | 0.01 | 0.0558 → 0.0425 | **−23.7%** | 0.01273 → 0.01203 | −5.4% | −12.5% | 0.03% |
+| TLOFW-ECSBS | 1.0 | 0.05 | 0.0565 → 0.0475 | **−16.0%** | 0.01231 → 0.01140 | −7.3% | −36.8% | 0.06% |
+
+Correcting **under 0.5% of the steps** cuts the tail by 15–36% in every cell, and the mean
+improves as well.
+
+![Tail cut by gating, mean not regressed](assets/fig_tail_gating_5cells.png)
+
+### 3.3 Trajectories before and after: SBO, `PEX0(17)`
+
+`PEX0(17)` is the dominant driver of SBO's worst-scenario errors (≈19% of the error mass in the
+20 worst baseline scenarios). Test set: 3,000 scenarios × 787 rollout steps.
+
+| `PEX0(17)` | Baseline (backbone only) | + Error-MLP | Δ |
+|---|---|---|---|
+| MAE | 0.02402 | 0.01758 | −26.8% |
+| p99 of \|error\| | 0.2058 | 0.0978 | **−52.5%** |
+| max \|error\| | 0.750 | 0.514 | −31.5% |
+| mean of the 10 worst scenarios | 0.3396 | 0.0812 | **−76.1%** |
+| scenarios improved / worsened / unchanged | | 1190 / 568 / 1242 | |
+
+**Worst baseline scenarios.** In these scenarios the true `PEX0(17)` rises to ≈0.9 and then drops sharply to
+≈0.1 around step 340–370. The baseline misses the turning point and freezes at ≈0.75. With the
+corrector the rollout follows the descent and returns to ≈0.1–0.2, although it lags by 50–100 steps and shows
+gate-switching ripples. Scenario 6482 is the least-improved of the worst ten: the corrector removes the
+spike, but a ≈0.2 offset remains.
+
+![Worst scenarios: GT vs baseline vs Error-MLP](assets/fig_ba_SBO_PEX017_scen.png)
+
+**All 3,000 test scenarios.** The baseline's stuck-at-0.75 bundle largely disappears after correction,
+while the median trajectory is untouched. The corrector edits the outliers, not the bulk.
+
+![All scenarios: baseline vs Error-MLP](assets/fig_ba_SBO_PEX017_all.png)
+
+**Per-step error.** p99 is identical up to step ≈100. Afterwards the baseline p99 grows to 0.25–0.27,
+while the corrected p99 stays at 0.08–0.15. The median error is essentially unchanged.
+
+![Per-step error p99/median](assets/fig_ba_SBO_PEX017_errband.png)
+
+### 3.4 Scheduled-sampling backbone (SBO)
+
+From-scratch SS training of the SBO backbone and the four-arm comparison are **in progress**.
+This section will be updated with the results.
+
+---
+
+## 4. Released weights
+
+Download the Drive folder (or `Error_MLP_weights.zip`) and place it as `weights/` in the repo root:
 
 ```
-scenario_number	TIME	PPS	TGRCS(10)	TGRCS(15)	ZWV	PSGGEN(1)	ZWDC2SG(1)S	MAX_CET	RCP_pump	HX	HPI	LPI	CNMT_Spray	MDAFW	Charging_pump	SAMG_1	SAMG_2	SAMG_3
+weights/
+├── backbones/                         # frozen ABC-Transformer APR1400 backbones (best val ckpt)
+│   ├── SBO_seq50_pred1/
+│   │   ├── config_used.yaml
+│   │   └── transformer_decoder_wonung_checkpoints_absolute/epoch=12-val_loss=...ckpt
+│   ├── LLOCA_CSP_seq50_pred1/   LLOCA_ECSBS_seq50_pred1/
+│   └── TLOFW_CSP_seq50_pred1/   TLOFW_ECSBS_seq50_pred1/
+└── error_mlp/                         # adopted 2-round DAgger correctors (≈30 KB each)
+    ├── SBO/error_mlp_dagger.pt   LLOCA_CSP/ ...   TLOFW_ECSBS/
+    └── op_val_select_summary.json     # frozen (β*, q*, τ*) per cell + validation/test numbers
 ```
 
-There are various types of data in this dataset.
+| Cell | backbone (d_model / heads / layers) | params | ckpt |
+|---|---|---|---|
+| SBO | 64 / 4 / 8, dropout 0 | 0.20 M | 2.6 MB |
+| LLOCA-CSP, LLOCA-ECSBS | 128 / 8 / 10, dropout 0.1 | 0.83 M | 10.2 MB |
+| TLOFW-CSP, TLOFW-ECSBS | 128 / 8 / 4, dropout 0.1 | 0.34 M | 4.1 MB |
 
-### Scenario Number (scenario_number)
+The backbones are the same checkpoints as the ABC-Transformer APR1400 release, re-packaged in the
+directory layout this code expects (`load_frozen_backbone_acc` reads `<run_dir>/config_used.yaml`
+plus the best `epoch=*.ckpt` in `<run_dir>/transformer_decoder_wonung_checkpoints_absolute/`).
 
-`scenario_number` represents a unique scenario.
+---
 
-### Time
-
-`TIME` represents the time of the incident. The time is in minutes. Note that the time has an increment of hours. It means that after $0^{th}$ time, we get $3610^{th}$ time.
-
-### Conditions
-
-There are various conditions. <br>
-`PPS`: **RCS pressure**: Unit: $Pa$:<br>
-`TGRCS(10)`: **Gas Temperature in Loop 1 Cold Leg**: Unit: $K$ <br>
-`TGRCS(15)`: **Gas Temperature in Loop 1 Hot Leg**: Unit: $K$ <br>
-`ZWV`: **Boiled-up water Level, Measured from Bottom of RPV**: Unit: $m$ <br>
-`PSGGEN(1)`: **Steam Generator (SG) 1 Pressure**: Unit: $Pa$ <br>
-`ZWDC2SG(1)S`: **Downcomer Water Level in SG 1**: Unit: $m$ <br>
-`MAX_CET`: **Maximum Core Temperature** Unit: `Unknown`<br>
-
-### Components
-
-In these variables, all the variables have two states either they are working right now or not working right now. For example, if a component `A` started to work, it's `True` or working. On the other hand if it fails to work or stopped, it's `False`.
-
-`RCP_pump`: (Reactor Coolant Pump) It is derived from the Failure time of the RCP Pump. Eg. In Scenario 0, it failed at 1.00002. Therefore, it is 0.8 at T = 0 and 0.2 at all timesteps after that.
-
-`HX`: (Heat Exchanger) `Critical: Values Inverted` It is derived from failure at `HX_failure_Component`. So, it should be working for `n` timesteps and after that, it should be not working. Eg. In scenario 0, it failed at 20.001. Therefore, it is 0.2 upto 72000 and and 0.8 afterwards at all timesteps after that.
-
-`HPI`: (High Pressure Injection) It is derived from two different variables `HPI_operation_Component` and `HPI_disabled_Component`. So, it is not running before it starts. Also, it stops working after the `HPI_disabled_Component` is turned on. In the case of Scenario 0. `HPI_operation_Component = 0.006`. So, at $t=0$, it is not working;i.e 0. At $t=1$, the value is 0.8; it is working. In this scenario, `HPI_disabled_Component` is 7.47. So, after 25200 seconds, it again stops working and the values are 0.2.
-
-`LPI`:(Low Pressure Injection) It is derived from two different variables `LPI_operation_Component` and `LPI_disabled_Component`. So, it is not running before it starts. Also, it stops working after the `LPI_disabled_Component` is turned on. In the case of Scenario 0. `LPI_operation_Component = 0.006`. So, at $t=0$, it is not working;i.e 0. At $t=1$, the value is 0.8; it is working. In this scenario, `LPI_disabled_Component` is 7.47. So, after 25200 seconds, it again stops working and the values are 0.2.
-
-`CNMT_Spray` (Containment Spray System) It is derived from `CSS_operation_Component` and `CSS_disabled_Component`. For Scenario 0, it starts at 6.45 and then is disabled at 7.47. THerefore, it is 0.2 at only 25200 seconds.
-
-`MDAFW` (Motor Driven Auxiliary Feedwater) It is derived from `MAFW_operation_Component` and `MAFW_actual_off_Component`. For Scenario 0, it starts at 0.002 and then is turned off at 12.00. Therefore, it is 0.8 from 3610 to 43200 seconds.
-
-`Charging_pump` (Charging_pump) It is derived from `CHP_operation_Component` and `CHP_disabled_Component`. For Scenario 0, it starts at 0.006 and then is turned off at 7.47. Therefore, it is 0.8 from 3610 to 25200 seconds.
-
-`SAMG 1` (Severe Accident Management Guidelines 1) It is derived from `M1_activation_SAMG`. For Scenario 0, it starts at 54.06. Therefore, it is 0.8 after 198000 seconds.
-
-`SAMG 2` (Severe Accident Management Guidelines 2) It is derived from `M2_activation_SAMG`. For Scenario 0, it starts at 72. Therefore, it is 0.2 at all timesteps; i.e it doesn't start.
-
-`SAMG 3` (Severe Accident Management Guidelines 3) It is derived from `M3_activation_SAMG`. For Scenario 0, it starts at 72. Therefore, it is 0.2 at all timesteps; i.e it doesn't start.
-
-## Example Dataset (Scenario 1):
-
-**Preprocessed**
-|scenario_number|TIME |PPS |TGRCS(10) |TGRCS(15) |ZWV |PSGGEN(1) |ZWDC2SG(1)S|MAX_CET |RCP_pump|HX |HPI|LPI|CNMT_Spray|MDAFW|Charging_pump|SAMG_1|SAMG_2|SAMG_3|
-|---------------|------|-----------|-----------|-----------|-----------|-----------|-----------|-----------|--------|---|---|---|----------|-----|-------------|------|------|------|
-|0 |0 |0.738697151|0.46426856 |0.385040858|0.799655432|0.702495531|0.739538951|0.261243504|0.8 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |0 |0.738697151|0.46426856 |0.385040858|0.799655432|0.702495531|0.739538951|0.261243504|0.8 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |0 |0.738697151|0.46426856 |0.385040858|0.799655432|0.702495531|0.739538951|0.261243504|0.8 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |3610 |0.763236562|0.466128649|0.374214256|0.799655432|0.795375675|0.734964885|0.261703586|0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |7200 |0.630022617|0.456828203|0.366770967|0.799655432|0.794009791|0.748687082|0.259403174|0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |10800 |0.630022617|0.456828203|0.366770967|0.799655432|0.784448599|0.748687082|0.259633215|0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |14400 |0.630022617|0.450317891|0.362710992|0.799655432|0.757813852|0.753261147|0.257792886|0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |18000 |0.626516987|0.437297266|0.354591041|0.799655432|0.727764394|0.753261147|0.25480235 |0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |21600 |0.623011357|0.418696374|0.342411114|0.799655432|0.695666109|0.753261147|0.250431567|0.2 |0.2|0.8|0.8|0.2 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |25200 |0.619505727|0.399165437|0.329554525|0.799655432|0.664933708|0.753261147|0.245600702|0.2 |0.2|0.8|0.8|0.8 |0.8 |0.8 |0.2 |0.2 |0.2 |
-|0 |28800 |0.408817356|0.431716998|0.344441102|0.799655432|0.65332369 |0.744113016|0.252731979|0.2 |0.2|0.2|0.2|0.2 |0.8 |0.2 |0.2 |0.2 |0.2 |
-|0 |32400 |0.490147975|0.461478426|0.366094305|0.799655432|0.758496795|0.744113016|0.26055338 |0.2 |0.2|0.2|0.2|0.2 |0.8 |0.2 |0.2 |0.2 |0.2 |
-|0 |36000 |0.505222184|0.469848828|0.368124293|0.799655432|0.794009791|0.739538951|0.262853792|0.2 |0.2|0.2|0.2|0.2 |0.8 |0.2 |0.2 |0.2 |0.2 |
-|0 |39600 |0.504871621|0.469848828|0.368124293|0.799655432|0.794692733|0.739538951|0.262623751|0.2 |0.2|0.2|0.2|0.2 |0.8 |0.2 |0.2 |0.2 |0.2 |
-|0 |43200 |0.505572747|0.469848828|0.368124293|0.799655432|0.794692733|0.739538951|0.262623751|0.2 |0.2|0.2|0.2|0.2 |0.8 |0.2 |0.2 |0.2 |0.2 |
-|0 |46800 |0.507676125|0.470778872|0.368800955|0.799655432|0.794692733|0.707520493|0.262623751|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |50400 |0.50592331 |0.470778872|0.406017398|0.493817806|0.794692733|0.684650166|0.307711827|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |54000 |0.478228832|0.46426856 |0.566386434|0.308178374|0.794009791|0.6800761 |0.424802799|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |57600 |0.342560946|0.459618337|0.592776275|0.225375174|0.794009791|0.670927969|0.726156774|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |61200 |0.517842453|0.499610256|0.46894702 |0.202671071|0.795375675|0.617411404|0.345668625|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |64800 |0.410570171|0.435437177|0.378274232|0.2 |0.794692733|0.519068997|0.599634113|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |68400 |0.205350583|0.414976195|0.481126946|0.2 |0.794009791|0.470583903|0.436304859|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |72000 |0.204964964|0.402885615|0.476390308|0.2 |0.794009791|0.466009837|0.314613063|0.2 |0.2|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |75600 |0.204754626|0.394515214|0.5054868 |0.2 |0.794009791|0.460520959|0.316683433|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |79200 |0.204684513|0.596334896|0.483833597|0.2 |0.794009791|0.451372828|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |82800 |0.204754626|0.604705297|0.481126946|0.2 |0.794009791|0.440852478|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |86400 |0.20500002 |0.60935552 |0.472330333|0.2 |0.793326848|0.428959907|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |90000 |0.205210358|0.617725922|0.466917032|0.2 |0.794692733|0.416609931|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |93600 |0.205210358|0.626096323|0.461503731|0.2 |0.794009791|0.402887734|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |97200 |0.205455752|0.615865833|0.458120418|0.2 |0.794009791|0.389165538|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |101000|0.205806315|0.618655966|0.452707117|0.2 |0.794009791|0.376358155|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |104000|0.206051709|0.613075699|0.450000467|0.2 |0.794009791|0.364008178|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |108000|0.20661261 |0.610285565|0.445263829|0.2 |0.794009791|0.34525451 |0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |112000|0.206822948|0.610285565|0.441880516|0.2 |0.794009791|0.331532313|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |115000|0.206928117|0.608425476|0.440527191|0.2 |0.794009791|0.320554556|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |119000|0.207489017|0.59912503 |0.43782054 |0.2 |0.794009791|0.30546014 |0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |122000|0.207664299|0.602845208|0.434437227|0.2 |0.794009791|0.29356757 |0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |126000|0.208014862|0.593544762|0.433760565|0.2 |0.794009791|0.279387967|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |130000|0.208400481|0.590754628|0.431730577|0.2 |0.794009791|0.264750958|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |133000|0.208891269|0.58703445 |0.431053914|0.2 |0.794009791|0.252858388|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |137000|0.208961382|0.525651505|0.481803609|0.2 |0.794009791|0.238450082|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |140000|0.209276889|0.580524137|0.431053914|0.2 |0.793326848|0.234058979|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |144000|0.209557339|0.575873914|0.431730577|0.2 |0.794009791|0.221160114|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |148000|0.210013071|0.574013825|0.4222573 |0.2 |0.794009791|0.211142911|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |151000|0.210153296|0.530301728|0.473006995|0.2 |0.794009791|0.205150885|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |155000|0.210749253|0.563783334|0.421580638|0.2 |0.794009791|0.200051717|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |158000|0.210889479|0.565643423|0.423610626|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |162000|0.211240042|0.5609932 |0.426993939|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |166000|0.211765886|0.559133111|0.428347264|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |169000|0.21201128 |0.557273022|0.430377252|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |173000|0.212256674|0.561923245|0.431053914|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |176000|0.212467012|0.556342977|0.433083902|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |180000|0.212747463|0.525651505|0.462857056|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |184000|0.213168138|0.551692754|0.43511389 |0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |187000|0.213448589|0.551692754|0.435790552|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |191000|0.214009489|0.547042531|0.436467215|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |194000|0.21428994 |0.547042531|0.436467215|0.2 |0.794009791|0.200044856|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.2 |0.2 |0.2 |
-|0 |198000|0.212502068|0.425206686|0.389100833|0.799655432|0.208728296|0.440852478|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |202000|0.212537125|0.312671287|0.258504952|0.799655432|0.206064821|0.670927969|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |205000|0.212852631|0.311741243|0.327524537|0.799655432|0.206133115|0.666353904|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |209000|0.213062969|0.3191816 |0.322787899|0.799655432|0.205586762|0.652174301|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |212000|0.213238251|0.370334054|0.325494549|0.799655432|0.205586762|0.635707665|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |216000|0.213588814|0.326621957|0.360681004|0.799655432|0.205518467|0.625644721|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |220000|0.213869264|0.33127218 |0.38301087 |0.799655432|0.205381879|0.666353904|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |223000|0.214465221|0.336852448|0.391807484|0.6554176 |0.205450173|0.661779838|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |227000|0.214815784|0.339642581|0.404664073|0.5726144 |0.205450173|0.657205773|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |230000|0.215166347|0.342432715|0.406694061|0.547239226|0.205450173|0.653546521|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |234000|0.215446798|0.347082938|0.410077374|0.556587974|0.205450173|0.645313203|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |238000|0.215692192|0.350803117|0.418873987|0.551245832|0.205450173|0.640281731|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |241000|0.215972642|0.351733161|0.4222573 |0.557923509|0.205381879|0.637537292|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |245000|0.21618298 |0.353593251|0.423610626|0.56059458 |0.205381879|0.666353904|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |248000|0.216428374|0.354523295|0.426317276|0.5726144 |0.205450173|0.666353904|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |252000|0.216708825|0.356383384|0.428347264|0.567272258|0.205450173|0.661779838|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-|0 |256000|0.217094444|0.359173518|0.427670601|0.553916903|0.205450173|0.651259488|0.315303186|0.2 |0.8|0.2|0.2|0.2 |0.2 |0.2 |0.8 |0.2 |0.2 |
-
-**Scenario Description**
-|case_name|scenario|RCP_failure_Component|HX_failure_Component|HPI_operation_Component|HPI_disabled_Component|HPI_forced_off_Component|HPI_actual_off_Component|LPI_operation_Component|LPI_disabled_Component|LPI_forced_off_Component|LPI_actual_off_Component|CSS_operation_Component|CSS_disabled_Component|CSS_forced_off_Component|CSS_actual_off_Component|MAFW_operation_Component|MAFW_actual_off_Component|CHP_operation_Component|CHP_disabled_Component|CHP_forced_off_Component|CHP_actual_off_Component|RWST_depleted_Phenomena|core_uncovery_Phenomena|SAMG_Entrance_Phenomena|vessel_failure_Phenomena|M1_activation_SAMG|M2_activation_SAMG|M3_activation_SAMG|
-|---------|--------|---------------------|--------------------|-----------------------|----------------------|------------------------|------------------------|-----------------------|----------------------|------------------------|------------------------|-----------------------|----------------------|------------------------|------------------------|------------------------|-------------------------|-----------------------|----------------------|------------------------|------------------------|-----------------------|-----------------------|-----------------------|------------------------|------------------|------------------|------------------|
-|TLOCCW_00000_1_20_72_72_72_12_72_54_72_72.SUM|0 |1.00002 |20.00134528 |0.006831389 |7.477908889 |72.00001444 |7.477908889 |0.006831389 |7.477908889 |72.00001444 |7.477908889 |6.452408889 |7.477908889 |72.00001444 |7.477908889 |0.002768889 |12.00000444 |0.006831389 |7.477908889 |72.00001444 |7.477908889 |7.477964444 |13.48800806 |14.32784139 |18.64934361 |54.06104444 |72.00001444 |72.00001444 |
-
-## Code Description:
+## 5. Repository layout & usage
 
 ```
 src/
-├── train.py                  # Script to train models
-├── predict.py               # Script for inference/prediction
-├── ...
-├── models/                  # All model definitions
-│   ├── model_lightning.py   # Base LightningModule (shared logic)
-│   ├── rnn/                 # RNN model architecture
-│   ├── transformer_decoder/ # Transformer decoder model
-│   └── <custom_model>/      # Custom model folder (replace with name)
-└── configs/                 # YAML config files for model variants
-    ├── rnn.yaml
-    ├── transformer_decoder.yaml
-    └── <custom_model_name>.yaml
+├── train.py, predict.py, predict_batched.py   # ABC-Transformer training / inference
+├── model_selector.py, models/                 # backbone registry (trnasformer_decoder = ABC-Transformer)
+│   └── error_mlp.py                           # Error-MLP corrector
+├── dataset.py, accident_dataset.py, utils.py  # windowed datasets, config loading
+├── error_rollout_acc.py                       # AR rollout: baseline / global / gated correction
+├── error_rollout_arbb.py, error_rollout_unroll.py
+├── configs/
+│   ├── error_mlp_accident.yaml                # per-cell paths + Error-MLP hyperparameters
+│   └── transformer_decoder.yaml, ...          # backbone configs
+└── experiments/
+    ├── train_error_mlp_acc.py                 # train Error-MLP (+ DAgger rounds)
+    ├── eval_error_mlp_acc.py                  # global-β sweep + gated evaluation
+    ├── op_val_select_test_eval.py             # select (β,q,τ) on validation, freeze, test once
+    ├── tail_analysis_acc.py                   # tail metrics helpers
+    ├── plot_cell_metrics.py                   # MAE/RMSE bar charts (baseline vs Error-MLP)
+    ├── plot_trajectories.py, plot_before_after.py
+    ├── train_backbone_ss_scratch.py           # from-scratch scheduled-sampling backbone
+    ├── ss_scratch_4way_eval.py, plot_4way_pex.py
+    └── train_backbone_arbb.py, eval_backbone_ood.py   # warm-start AR-aware fine-tune (negative result)
 ```
 
-**Running The Code**
+Requires Python ≥ 3.10: `pip install -r requirements.txt`.
 
-1. In both `train.py` and `predict.py` there should be a variable called `selected_model`. You'll need to change that to the name of the model you want to train.
+1. **Paths.** In `src/configs/error_mlp_accident.yaml`, point each cell to your data and weights:
+   - `run_dir` → `weights/backbones/<CELL>_seq50_pred1`
+   - `train_csv` / `test_csv` → your scaled CSVs
+   - `out_root` → `weights/error_mlp` (to use the released correctors) or a new directory (to train your own)
+   - `cache_dir` → any scratch directory.
+2. **Evaluate the released corrector** (from `src/`, `NONINTERACTIVE=1`):
+   ```bash
+   python experiments/op_val_select_test_eval.py --cell SBO
+   python experiments/plot_cell_metrics.py                                # MAE/RMSE bars, Section 3.1
+   python experiments/plot_before_after.py --cell SBO --var "PEX0(17)"   # trajectories, Section 3.3
+   ```
+3. **Train a corrector**:
+   ```bash
+   python experiments/train_error_mlp_acc.py --cell SBO --loss tail_weighted --dagger-rounds 2
+   ```
+   Pass `--run-dir <dir>` to attach a corrector to a different backbone.
+4. **Scheduled-sampling backbone**:
+   ```bash
+   python experiments/train_backbone_ss_scratch.py --cell SBO
+   ```
 
-2. In `predict.py`; you'll also need to provide the path of the saved model (lightningmodule)
+Datasets (MAAP-generated CSVs) are not redistributed; see the ABC-Transformer README for the
+format and the data-availability statement.
 
-**Training logs are saved inside well, `training_logs` directory**<br>
-**Plots are saved inside `plots` directory**
+---
 
-Unless sure, don't change anything else. The code should run as it is.
-Make sure to change the config though.
+## 6. Scope and caveats
+
+- All numbers are in normalized (0.1–0.9 min–max) units, from a single corrector seed per cell.
+- The backbone is frozen. The corrector is cell-specific and is not claimed to transfer across accidents
+  or plants.
+- Gains concentrate in the tail. Per scenario, the corrector can also make things slightly worse (SBO
+  `PEX0(17)`: 568 of 3,000 test scenarios worsen), so reliability should be judged at the
+  distribution level.
+- The operating point is selected on validation scenarios held out from the corrector. These scenarios may still have
+  been seen during the original backbone training or model selection.
+
+## Citation
+
+If you use the backbone, please cite ABC-Transformer (see its `CITATION.cff`):
+
+> W. Jeong, S. Khanal, J. Lee, S. Lee, J. Jeon, *Enhancing Resolution and Reliability
+> with Attention Mechanisms in Nuclear Accident Surrogate Modeling*,
+> Reliability Engineering & System Safety (under revision).

@@ -1,0 +1,9 @@
+# Tested with Python 3.10.18 (CUDA 12.1 build of torch)
+torch==2.5.1
+pytorch-lightning==2.5.3
+numpy==2.2.6
+pandas==2.3.2
+PyYAML==6.0.2
+matplotlib==3.10.5
+scikit-learn==1.7.1
+tqdm
