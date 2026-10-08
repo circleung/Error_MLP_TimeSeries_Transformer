@@ -46,6 +46,8 @@ figures/
 data/
 scripts/
 weights/
+outputs/
+release/
 *.ipynb
 *.pdf
 *.npz

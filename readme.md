@@ -217,11 +217,20 @@ src/
 
 Requires Python ≥ 3.10: `pip install -r requirements.txt`.
 
-1. **Paths.** In `src/configs/error_mlp_accident.yaml`, point each cell to your data and weights:
-   - `run_dir` → `weights/backbones/<CELL>_seq50_pred1`
+1. **Paths.** In `src/configs/error_mlp_accident.yaml`, set the absolute paths for your machine:
+   - `run_dir` → `<repo>/weights/backbones/<CELL>_seq50_pred1`
    - `train_csv` / `test_csv` → your scaled CSVs
-   - `out_root` → `weights/error_mlp` (to use the released correctors) or a new directory (to train your own)
-   - `cache_dir` → any scratch directory.
+   - `out_root` → `<repo>/outputs`; `cache_dir` → `<repo>/outputs/_window_cache`
+   - To use the released correctors, copy `weights/error_mlp/*` into `outputs/`
+     (or point `out_root` at `weights/error_mlp`).
+
+   Local working folders (all gitignored):
+
+   ```
+   <repo>/weights/   # released weights (Drive)
+   <repo>/outputs/   # training / evaluation outputs
+   <repo>/release/   # zipped weights for upload
+   ```
 2. **Evaluate the released corrector** (from `src/`, `NONINTERACTIVE=1`):
    ```bash
    python experiments/op_val_select_test_eval.py --cell SBO

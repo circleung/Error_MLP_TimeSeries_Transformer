@@ -23,40 +23,40 @@ data:
   seq_len: 50
   pred_len: 1
   num_continuous: 10
-  cache_dir: "/home/wonung/wonung_data/error_mlp_accident_out/_window_cache"
+  cache_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/outputs/_window_cache"
 
 seq50_data_root: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data"
-weight_root: "/home/wonung/wonung_data/APR1400_weight"
+weight_root: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones"
 
 # Per-cell backbone run_dir + SCALED train/test csv. num_controls/step_norm_const
 # recorded for reference (num_controls is also inferred from the csv header).
 cells:
   SBO:
-    run_dir: "/home/wonung/wonung_data/APR1400_weight/SBO_seq50_pred1"
+    run_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones/SBO_seq50_pred1"
     train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_SBO/SBO_Train_Scaled.csv"
     test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_SBO/SBO_Test_Scaled.csv"
     num_controls: 4
     step_norm_const: 1000.0
   LLOCA_CSP:
-    run_dir: "/home/wonung/wonung_data/APR1400_weight/LLOCA_CSP_seq50_pred1"
+    run_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones/LLOCA_CSP_seq50_pred1"
     train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/CSP/LLOCA_CSP_Train_0_Scaled.csv"
     test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/CSP/LLOCA_CSP_Test_0_Scaled.csv"
     num_controls: 4
     step_norm_const: 1000.0
   LLOCA_ECSBS:
-    run_dir: "/home/wonung/wonung_data/APR1400_weight/LLOCA_ECSBS_seq50_pred1"
+    run_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones/LLOCA_ECSBS_seq50_pred1"
     train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/ECSBS/LLOCA_ECSBS_Train_0_Scaled.csv"
     test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_LLOCA/ECSBS/LLOCA_ECSBS_Test_0_Scaled.csv"
     num_controls: 4
     step_norm_const: 1000.0
   TLOFW_CSP:
-    run_dir: "/home/wonung/wonung_data/APR1400_weight/TLOFW_CSP_seq50_pred1"
+    run_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones/TLOFW_CSP_seq50_pred1"
     train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/CSP/TLOFW_CSP_Train_0_Scaled.csv"
     test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/CSP/TLOFW_CSP_Test_0_Scaled.csv"
     num_controls: 5
     step_norm_const: 1000.0
   TLOFW_ECSBS:
-    run_dir: "/home/wonung/wonung_data/APR1400_weight/TLOFW_ECSBS_seq50_pred1"
+    run_dir: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/weights/backbones/TLOFW_ECSBS_seq50_pred1"
     train_csv: "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/ECSBS/TLOFW_ECSBS_Train_0_Scaled.csv"
     test_csv:  "/home/wonung/wonung_data/MIMO_TimeSeries_Transformer/data/APR1400_TLOFW/ECSBS/TLOFW_ECSBS_Test_0_Scaled.csv"
     num_controls: 5
@@ -115,4 +115,4 @@ unroll:
   warm_start: true        # init from the committed one-shot error_mlp.pt (else fresh)
 
 # Outputs go HERE (NOT the weight dirs, NOT the repo). Per cell: <out_root>/<cell>/.
-out_root: "/home/wonung/wonung_data/error_mlp_accident_out"
+out_root: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/outputs"

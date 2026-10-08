@@ -76,7 +76,7 @@ tail_frac: 0.10
 
 # Outputs (NEW tree; NEVER the original weight dirs). Per cell ckpt goes to
 # <out_root>/<cell>_arbb_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/
-out_root: "/home/wonung/wonung_data/error_mlp_accident_out/arbb"
+out_root: "/home/wonung/wonung_data/Error_MLP_TimeSeries_Transformer/outputs/arbb"
 
 # Per-epoch CSV logs: results/arbb/<cell>/train_log.csv
 results_root: "results/arbb"
