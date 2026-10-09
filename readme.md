@@ -67,9 +67,11 @@ The frozen operating points ship in `weights/error_mlp/op_val_select_summary.jso
 `src/experiments/train_backbone_ss_scratch.py` retrains the SBO backbone **from scratch** with
 scheduled sampling, keeping the original architecture, optimizer and update budget:
 
-- detached feedback with unroll H = 10;
-- feedback probability ramped 0 → 0.5;
-- checkpoint selected on validation AR MAE.
+- the training data, batch size (128), optimizer (AdamW 1e-3, StepLR 2 / 0.1), loss (MSE) and seed are unchanged;
+- each training sequence is unrolled for H = 10 steps, and at each step the model's own detached prediction is fed back with probability p;
+- p is ramped linearly from 0 to 0.5 over epochs 0–1 and then held; controls are always the ground truth;
+- the checkpoint is selected on validation AR MAE, using a scenario-disjoint 10% split (700 scenarios);
+- training ran 25 epochs with early stopping, and epoch 14 was selected.
 
 `ss_scratch_4way_eval.py` then compares four arms on the same test set: baseline,
 baseline + Error-MLP, SS backbone and SS backbone + Error-MLP.
@@ -154,16 +156,53 @@ while the corrected p99 stays at 0.08–0.15. The median error is essentially un
 
 ![Per-step error p99/median](assets/fig_ba_SBO_PEX017_errband.png)
 
-### 3.4 Scheduled-sampling backbone (SBO)
+### 3.4 Scheduled-sampling backbone (SBO): four-way comparison
 
-From-scratch SS training of the SBO backbone and the four-arm comparison are **in progress**.
-This section will be updated with the results.
+The SBO test set (3,000 scenarios) is used for all four arms. The corrector for the SS backbone is
+trained with the same recipe as Section 2.1. Its operating point is also selected on validation and frozen
+(β\* = 0.5, q\* = 0.02, τ\* = 0.1424). Its realized fire rate is 0.24%.
+
+| 10 variables | 1. Baseline | 2. Baseline + Error-MLP | 3. SS backbone | 4. SS + Error-MLP |
+|---|---|---|---|---|
+| MAE | 0.01455 | 0.01200 (−17.5%) | 0.00852 (−41.4%) | **0.00846 (−41.9%)** |
+| RMSE | 0.02315 | 0.01901 (−17.9%) | 0.01414 (−38.9%) | **0.01394 (−39.8%)** |
+| p99 | 0.0895 | 0.0570 (−36.3%) | 0.0565 (−36.9%) | **0.0474 (−47.1%)** |
+| max | 0.292 | **0.135 (−53.6%)** | 0.427 (+46%) | 0.429 (+47%) |
+| scenarios better / worse vs 1 | – | 1252 / 506 | 2646 / 354 | 2639 / 361 |
+| one-step TF MSE | 1.61e-5 | – | 1.69e-5 (+4.6%) | – |
+
+| `PEX0(17)` | 1. Baseline | 2. Baseline + Error-MLP | 3. SS backbone | 4. SS + Error-MLP |
+|---|---|---|---|---|
+| MAE | 0.0240 | 0.0176 (−26.8%) | 0.0132 (−45.2%) | **0.0124 (−48.6%)** |
+| RMSE | 0.0303 | 0.0220 (−27.4%) | 0.0172 (−43.4%) | **0.0162 (−46.7%)** |
+| p99 | 0.2058 | **0.0978 (−52.5%)** | 0.1169 (−43.2%) | 0.1036 (−49.7%) |
+| max | 0.750 | **0.514** | 0.809 | 0.809 |
+
+![Four-way MAE / RMSE / p99](assets/fig_4way_metrics_SBO.png)
+
+![Four-way PEX0(17) per-step error](assets/fig_4way_SBO_PEX017_errband.png)
+
+![Four-way PEX0(17) trajectories, all test scenarios](assets/fig_4way_SBO_PEX017_all.png)
+
+**Reading.**
+- **Scheduled sampling moves the whole error distribution down.** MAE and RMSE fall by about 40% and 2,646 of 3,000 scenarios
+  improve. This matches the OPR1000 SS result in ABC-Transformer. One-step accuracy is traded away (+4.6% TF MSE).
+- **The corrector still adds a tail gain on top of SS.** Combining both gives the lowest 10-variable p99 (−47%),
+  17% below baseline + Error-MLP.
+- **The worst case gets worse with SS.** The maximum step error rises from 0.29 to 0.43, and some
+  scenarios now overshoot late in the rollout (spikes in the lower-left panel). The corrector does not
+  remove these. Baseline + Error-MLP remains the safest for the single worst case and for the `PEX0(17)` p99.
+- **The two methods are complementary.** SS lowers the typical error, and the gated corrector targets the
+  rare large ones.
+
+Caveats: a single training seed (earlier warm-start SS runs changed sign across seeds); the SS
+validation split differs from the original backbone's (non-reproducible) window-level split.
 
 ---
 
 ## 4. Released weights
 
-Download `Error_MLP_weights.zip` from the Drive folder above and unzip it in the repo root (it creates `weights/`):
+Download the latest `abc-transformer-errormlp_weights_v*.zip` from the Drive folder above and unzip it in the repo root (it creates `weights/`):
 
 ```
 weights/
@@ -174,8 +213,11 @@ weights/
 │   ├── LLOCA_CSP_seq50_pred1/   LLOCA_ECSBS_seq50_pred1/
 │   └── TLOFW_CSP_seq50_pred1/   TLOFW_ECSBS_seq50_pred1/
 └── error_mlp/                         # adopted 2-round DAgger correctors (≈30 KB each)
-    ├── SBO/error_mlp_dagger.pt   LLOCA_CSP/ ...   TLOFW_ECSBS/
-    └── op_val_select_summary.json     # frozen (β*, q*, τ*) per cell + validation/test numbers
+│   ├── SBO/error_mlp_dagger.pt   LLOCA_CSP/ ...   TLOFW_ECSBS/
+│   └── op_val_select_summary.json     # frozen (β*, q*, τ*) per cell + validation/test numbers
+└── ss/                                # scheduled-sampling SBO backbone (Section 3.4)
+    ├── backbones/SBO_seq50_pred1/     # config_used.yaml, train_log.json, epoch=14-...ckpt (0.8 MB)
+    └── error_mlp/SBO/error_mlp_dagger.pt, op_val_select_summary.json
 ```
 
 | Cell | backbone (d_model / heads / layers) | params | ckpt |
@@ -211,7 +253,7 @@ src/
     ├── plot_cell_metrics.py                   # MAE/RMSE bar charts (baseline vs Error-MLP)
     ├── plot_trajectories.py, plot_before_after.py
     ├── train_backbone_ss_scratch.py           # from-scratch scheduled-sampling backbone
-    ├── ss_scratch_4way_eval.py, plot_4way_pex.py
+    ├── ss_scratch_4way_eval.py, plot_4way_pex.py, plot_4way_metrics.py   # 4-way comparison
     └── train_backbone_arbb.py, eval_backbone_ood.py   # warm-start AR-aware fine-tune (negative result)
 ```
 
@@ -245,6 +287,11 @@ Requires Python ≥ 3.10: `pip install -r requirements.txt`.
 4. **Scheduled-sampling backbone**:
    ```bash
    python experiments/train_backbone_ss_scratch.py --cell SBO
+   python experiments/train_error_mlp_acc.py --cell SBO --run-dir <ss_backbone_dir> --out-root <dir> \
+       --loss tail_weighted --dagger-rounds 2 --dagger-beta 0.5 --dagger-q 0.1 --dagger-rollback-tol 0.005
+   python experiments/ss_scratch_4way_eval.py --cell SBO --ss-run-dir <ss_backbone_dir> \
+       --ss-mlp <dir>/SBO/error_mlp_dagger.pt --out-json <out.json> --out-npz <out.npz>
+   python experiments/plot_4way_metrics.py --eval-json <out.json>
    ```
 
 Datasets (MAAP-generated CSVs) are not redistributed; see the ABC-Transformer README for the

@@ -70,6 +70,7 @@ src/experiments/*
 !src/experiments/train_backbone_ss_scratch.py
 !src/experiments/ss_scratch_4way_eval.py
 !src/experiments/plot_4way_pex.py
+!src/experiments/plot_4way_metrics.py
 
 # configs: drop the unified-60min ErrorMLP config (not part of the per-accident pipeline)
 src/configs/error_mlp.yaml

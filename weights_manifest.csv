@@ -15,3 +15,8 @@ weights/error_mlp/op_val_select_summary.json,operating_point,all,this-repo,3972,
 weights/error_mlp/SBO/error_mlp_dagger.pt,error_mlp_dagger,SBO,this-repo,31778,3269f61ff27daa5f
 weights/error_mlp/TLOFW_CSP/error_mlp_dagger.pt,error_mlp_dagger,TLOFW_CSP,this-repo,30498,b966854454f9e536
 weights/error_mlp/TLOFW_ECSBS/error_mlp_dagger.pt,error_mlp_dagger,TLOFW_ECSBS,this-repo,30498,54946fe2a7e8bc0c
+weights/ss/backbones/SBO_seq50_pred1/config_used.yaml,ss_backbone,SBO,this-repo,1039,4553c726f29adf19
+weights/ss/backbones/SBO_seq50_pred1/train_log.json,ss_backbone,SBO,this-repo,11106,b39a2f1e34ae1103
+weights/ss/backbones/SBO_seq50_pred1/transformer_decoder_wonung_checkpoints_absolute/epoch=14-val_loss=0.00857698-step=587730.ckpt,ss_backbone,SBO,this-repo,848241,11ba11d8e55ca731
+weights/ss/error_mlp/op_val_select_summary.json,operating_point,all,this-repo,695,301c199d3f91f9c0
+weights/ss/error_mlp/SBO/error_mlp_dagger.pt,ss_error_mlp_dagger,SBO,this-repo,31778,d5f0650618224c78
